@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IMU 3D Visualizer</title>
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js", "three/addons/": "./vendor/" } }
+</script>
+</head>
+<body>
+<div id="view"></div>
+
+<section id="hud" class="panel">
+  <h1>IMU 3D Visualizer</h1>
+  <div id="conn" class="badge wait"><span class="dot"></span><span id="connText">Connecting…</span></div>
+  <div id="motion" class="chip">Still</div>
+  <div class="readouts">
+    <div class="row"><span id="kz" class="k z">Up</span><span id="pz" class="v">0.0</span><span class="u">cm</span></div>
+  </div>
+  <div id="angles" class="sub"></div>
+  <div id="edge" class="sub warn"></div>
+  <div id="calState" class="sub"></div>
+  <p class="note">Only up and down are tracked, from the board's acceleration. Hold it still for a second at the start, then lift and lower it. Height is approximate: press Z to bring it back to the middle.</p>
+</section>
+
+<section id="controls" class="panel">
+  <button id="zeroPos" class="wide">Zero position <kbd>Z</kbd></button>
+  <button id="zeroHead" class="wide">Zero heading <kbd>H</kbd></button>
+  <label><input type="checkbox" id="optTrail" checked> Trail <kbd>T</kbd></label>
+  <button id="clearTrail" class="wide">Clear trail <kbd>C</kbd></button>
+  <button id="calibrate" class="wide">Calibrate accelerometer</button>
+  <div class="seg">
+    <button data-view="iso">Iso <kbd>1</kbd></button>
+    <button data-view="top">Top <kbd>2</kbd></button>
+    <button data-view="side">Side <kbd>3</kbd></button>
+    <button data-view="rear">Rear <kbd>4</kbd></button>
+  </div>
+</section>
+
+<section id="calib" class="panel" hidden>
+  <h1>Calibrate accelerometer</h1>
+  <p class="note">Turn the board onto each of its six sides in turn and hold it still for a couple of seconds. Each one ticks off by itself. It takes about a minute and makes position much steadier.</p>
+  <div id="faces"></div>
+  <div id="calibMsg" class="sub"></div>
+  <button id="calibCancel" class="wide">Cancel</button>
+</section>
+
+<pre id="log" class="panel"></pre>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

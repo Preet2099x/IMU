@@ -37,6 +37,13 @@ constexpr float STILL_TIME_REQUIRED_S = 1.0f;
 constexpr float BIAS_ADAPT_TAU_S = 2.5f;
 constexpr uint32_t PRINT_INTERVAL_MS = 100;  // 10 Hz
 
+// Optional fast stream for the 3D visualizer. Sending 'v' at least every
+// VIZ_TIMEOUT_MS swaps the text line for a 50 Hz CSV line; 'h' (or silence)
+// switches back, so a plain serial monitor still sees the normal output.
+constexpr uint32_t VIZ_INTERVAL_MS = 20;
+constexpr uint32_t VIZ_TIMEOUT_MS = 3000;
+constexpr uint32_t LOG_INTERVAL_MS = 50;   // 20 Hz for the long-run log
+
 // Mahony proportional gain: how hard accel/mag pull the estimate toward
 // vertical/north. There is deliberately no integral term: bias is learned
 // explicitly while at rest, and an integral learned in one orientation turns
@@ -158,12 +165,22 @@ void setupBMM350() {
   delay(20);
 }
 
+// Accelerometer calibration, set over serial by the 3D visualizer as
+// "c,ox,oy,oz,sx,sy,sz": calibrated = (raw - offset) * scale, per axis, in g.
+// Every use of the accelerometer (tilt, motion detection) goes through it.
+float accOffset[3] = {0.0f, 0.0f, 0.0f};
+float accScale[3] = {1.0f, 1.0f, 1.0f};
+float accRaw[3] = {0.0f, 0.0f, 1.0f}; // last reading before the calibration is applied
+
 bool readAccelG(float &x, float &y, float &z) {
   uint8_t b[6];
   if (!readBytes(ACC_ADDR, 0x12, b, 6)) return false;
-  x = (int16_t)(b[0] | (b[1] << 8)) / ACC_LSB_PER_G;
-  y = (int16_t)(b[2] | (b[3] << 8)) / ACC_LSB_PER_G;
-  z = (int16_t)(b[4] | (b[5] << 8)) / ACC_LSB_PER_G;
+  accRaw[0] = (int16_t)(b[0] | (b[1] << 8)) / ACC_LSB_PER_G;
+  accRaw[1] = (int16_t)(b[2] | (b[3] << 8)) / ACC_LSB_PER_G;
+  accRaw[2] = (int16_t)(b[4] | (b[5] << 8)) / ACC_LSB_PER_G;
+  x = (accRaw[0] - accOffset[0]) * accScale[0];
+  y = (accRaw[1] - accOffset[1]) * accScale[1];
+  z = (accRaw[2] - accOffset[2]) * accScale[2];
   return true;
 }
 
@@ -546,8 +563,8 @@ void calibrateMagnetometer() {
 }
 
 // Starting from the identity quaternion makes the filter converge through a
-// large initial error, which winds up the integral term and then takes a long
-// time to unwind. Seeding from the first accel sample avoids that transient.
+// large initial error. Seeding from the first accel sample starts it at the
+// correct tilt instead.
 void seedOrientationFromAccel() {
   float ax, ay, az;
   if (!readAccelG(ax, ay, az)) return;
@@ -561,6 +578,21 @@ void seedOrientationFromAccel() {
   q1 = sr * cp;
   q2 = cr * sp;
   q3 = -sr * sp;
+}
+
+// One command line from the PC. Only "c,ox,oy,oz,sx,sy,sz" is understood.
+void handleCommand(const char *line) {
+  float v[6];
+  if (line[0] != 'c' || line[1] != ',') return;
+  if (sscanf(line + 2, "%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return;
+  for (int i = 0; i < 3; i++) {
+    if (!(fabsf(v[i]) < 0.5f) || !(v[3 + i] > 0.5f && v[3 + i] < 2.0f)) return; // not a plausible calibration
+  }
+  for (int i = 0; i < 3; i++) {
+    accOffset[i] = v[i];
+    accScale[i] = v[3 + i];
+  }
+  Serial.printf("ACAL,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\n", v[0], v[1], v[2], v[3], v[4], v[5]);
 }
 
 void quaternionToEuler(float &rollDeg, float &pitchDeg, float &yawDeg) {
@@ -634,14 +666,33 @@ void loop() {
   static float stillTime = 0;
   static bool atRest = false;
 
-  static uint32_t overrunCount = 0, saturationCount = 0;
-  static int maxBatch = 0;
+  // From the PC: 'v' keeps the fast stream on, 'h' turns it off, and a line
+  // starting with "c," sets the accelerometer calibration.
+  static uint32_t vizUntilMs = 0, lastVizMs = 0, logUntilMs = 0, lastLogMs = 0;
+  static char cmd[96];
+  static uint8_t cmdLen = 0;
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (cmdLen == 0 && c == 'v') vizUntilMs = millis() + VIZ_TIMEOUT_MS;
+    else if (cmdLen == 0 && c == 'h') vizUntilMs = logUntilMs = 0;
+    else if (cmdLen == 0 && c == 'l') logUntilMs = millis() + VIZ_TIMEOUT_MS;
+    else if (c == '\n' || c == '\r') {
+      if (cmdLen > 0) {
+        cmd[cmdLen] = 0;
+        handleCommand(cmd);
+      }
+      cmdLen = 0;
+    } else if (cmdLen < sizeof(cmd) - 1) {
+      cmd[cmdLen++] = c;
+    }
+  }
 
   uint32_t nowUs = micros();
   if (nowUs - lastAccelUs >= ACCEL_READ_INTERVAL_US) {
     lastAccelUs = nowUs;
     accelValid = readAccelG(ax, ay, az);
-    magValid = useMagInFusion && readMag(mx, my, mz);
+    bool magOk = readMag(mx, my, mz); // also read when not fused, so the log mode can report it
+    magValid = useMagInFusion && magOk;
   }
 
   static uint32_t lastFifoUs = 0;
@@ -653,7 +704,6 @@ void loop() {
   int n = readGyroFifo(frames, 100, overrun);
   if (overrun) {
     // Samples were dropped, so this batch doesn't cover the elapsed time.
-    overrunCount++;
     flushGyroFifo();
     odrWindowStartUs = micros();
     odrWindowFrames = 0;
@@ -668,15 +718,7 @@ void loop() {
       odrWindowFrames = 0;
     }
   }
-  if (n > maxBatch) maxBatch = n;
-
   for (int i = 0; i < n; i++) {
-    for (int k = 0; k < 3; k++) {
-      if (frames[i][k] >= 32767 || frames[i][k] <= -32767) {
-        saturationCount++;
-        break;
-      }
-    }
     gx = frames[i][0] / GYR_LSB_PER_DPS - gyroBiasDps[0];
     gy = frames[i][1] / GYR_LSB_PER_DPS - gyroBiasDps[1];
     gz = frames[i][2] / GYR_LSB_PER_DPS - gyroBiasDps[2];
@@ -705,16 +747,33 @@ void loop() {
                  dtSample, atRest);
   }
 
-  if (millis() - lastPrintMs >= PRINT_INTERVAL_MS) {
+  bool viz = vizUntilMs != 0 && (int32_t)(vizUntilMs - millis()) > 0;
+  if (viz) {
+    if (millis() - lastVizMs >= VIZ_INTERVAL_MS) {
+      lastVizMs = millis();
+      // Orientation, the accelerometer exactly as the chip reports it (g, sensor
+      // frame, before calibration), and the rotation rate (deg/s).
+      Serial.printf("VIZ,%lu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f\n",
+                    (unsigned long)millis(), q0, q1, q2, q3, accRaw[0], accRaw[1], accRaw[2], gx, gy, gz);
+    }
+  } else if (logUntilMs != 0 && (int32_t)(logUntilMs - millis()) > 0) {
+    // Logging: orientation plus every sensor. Accelerometer in g (calibrated if a
+    // calibration was set), gyro in deg/s (bias removed), magnetometer as the
+    // fusion sees it (counts, calibrated once the mag calibration has run).
+    if (millis() - lastLogMs >= LOG_INTERVAL_MS) {
+      lastLogMs = millis();
+      float roll, pitch, yaw;
+      quaternionToEuler(roll, pitch, yaw);
+      float heading = yaw < 0.0f ? yaw + 360.0f : yaw;
+      Serial.printf("LOG,%lu,%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+                    (unsigned long)millis(), heading, pitch, roll, ax, ay, az, gx, gy, gz, mx, my, mz);
+    }
+  } else if (millis() - lastPrintMs >= PRINT_INTERVAL_MS) {
     lastPrintMs = millis();
     float roll, pitch, yaw;
     quaternionToEuler(roll, pitch, yaw);
     float heading = yaw < 0.0f ? yaw + 360.0f : yaw;
     Serial.printf("Heading:%6.1f  Pitch:%6.1f  Roll:%6.1f  Gyro(dps) X:%7.2f Y:%7.2f Z:%7.2f\n",
                   heading, pitch, roll, gx, gy, gz);
-    Serial.printf("DIAG rest=%d odr=%.1f maxBatch=%d overruns=%lu saturations=%lu bias=%.4f %.4f %.4f\n",
-                  atRest, 1.0f / dtSample, maxBatch, (unsigned long)overrunCount,
-                  (unsigned long)saturationCount, gyroBiasDps[0], gyroBiasDps[1], gyroBiasDps[2]);
-    maxBatch = 0;
   }
 }

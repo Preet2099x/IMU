@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IMU 3D Mapping</title>
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js", "three/addons/": "./vendor/" } }
+</script>
+</head>
+<body>
+<div id="view"></div>
+
+<section id="hud" class="panel">
+  <h1>IMU 3D Mapping</h1>
+  <div id="conn" class="badge wait"><span class="dot"></span><span id="connText">Connecting…</span></div>
+  <div class="readouts">
+    <div class="row"><span class="k roll">Roll</span><span id="roll" class="v">0.0</span><span class="u">°</span></div>
+    <div class="row"><span class="k pitch">Pitch</span><span id="pitch" class="v">0.0</span><span class="u">°</span></div>
+    <div class="row"><span class="k yaw">Heading</span><span id="yaw" class="v">0.0</span><span class="u">°</span></div>
+  </div>
+  <div id="modeNote" class="sub"></div>
+  <div id="raw" class="sub"></div>
+  <div id="gyro" class="sub"></div>
+</section>
+
+<section id="controls" class="panel">
+  <h2>Reference</h2>
+  <div class="seg" id="mode">
+    <button data-mode="flat" class="on" title="The first reading is treated as lying flat, heading 0">Start = flat</button>
+    <button data-mode="abs" title="Show the angles exactly as the board reports them">Absolute</button>
+  </div>
+  <button id="rezero" class="wide">Re-zero here <kbd>Z</kbd></button>
+
+  <h2>Show</h2>
+  <label><input type="checkbox" id="optGimbal" checked> Gimbal rings <kbd>G</kbd></label>
+  <label><input type="checkbox" id="optTrail" checked> Nose trail <kbd>T</kbd></label>
+  <label><input type="checkbox" id="optGyro" checked> Gyro arrow</label>
+  <button id="clearTrail" class="wide">Clear trail <kbd>C</kbd></button>
+
+  <h2>View</h2>
+  <div class="seg views">
+    <button data-view="iso">Iso <kbd>1</kbd></button>
+    <button data-view="top">Top <kbd>2</kbd></button>
+    <button data-view="side">Side <kbd>3</kbd></button>
+    <button data-view="rear">Rear <kbd>4</kbd></button>
+  </div>
+
+  <h2>Board</h2>
+  <button id="skipCal" class="wide" title="Sends a key press. Skips the startup magnetometer calibration if the board is waiting for one.">Skip mag calibration</button>
+</section>
+
+<pre id="log" class="panel"></pre>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

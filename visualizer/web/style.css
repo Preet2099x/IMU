@@ -1,0 +1,123 @@
+:root {
+  --panel: rgba(14, 22, 38, 0.76);
+  --line: rgba(143, 166, 201, 0.2);
+  --text: #dfe8f5;
+  --muted: #8fa6c9;
+  --x: #ff5c5c;
+  --y: #5cd67c;
+  --z: #5c9bff;
+  --amber: #ffb020;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  color: var(--text);
+  background: radial-gradient(1200px 720px at 50% 32%, #1c2d4a 0%, #0d1524 62%, #070b14 100%);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+#view { position: fixed; inset: 0; }
+#view canvas { display: block; }
+
+.panel {
+  position: fixed;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  backdrop-filter: blur(8px);
+  padding: 14px 16px;
+}
+
+h1 { margin: 0 0 10px; font-size: 15px; font-weight: 650; }
+
+#hud { top: 16px; left: 16px; width: 270px; }
+
+.badge { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); margin-bottom: 10px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: #66758c; flex: none; }
+.badge.ok .dot { background: var(--y); box-shadow: 0 0 8px var(--y); }
+.badge.demo .dot { background: var(--z); box-shadow: 0 0 8px var(--z); }
+.badge.warn .dot { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+.badge.ok, .badge.demo { color: var(--text); }
+
+.chip {
+  display: inline-block;
+  margin-bottom: 10px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(92, 214, 124, 0.16);
+  color: var(--y);
+}
+.chip.moving { background: rgba(255, 176, 32, 0.18); color: var(--amber); }
+
+.row { display: grid; grid-template-columns: 70px 1fr 26px; align-items: baseline; }
+.k { font-size: 12px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; }
+.k.x { color: var(--x); }
+.k.y { color: var(--y); }
+.k.z { color: var(--z); }
+.v, .sub { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-variant-numeric: tabular-nums; }
+.v { font-size: 30px; text-align: right; }
+.u { color: var(--muted); padding-left: 4px; }
+.sub { font-size: 11.5px; color: var(--muted); margin-top: 6px; min-height: 1.4em; }
+.sub.warn { color: var(--amber); }
+.note { margin: 10px 0 0; font-size: 12px; color: var(--muted); }
+
+#controls { top: 16px; right: 16px; width: 200px; }
+
+#calib { bottom: 16px; right: 16px; width: 300px; }
+#calib[hidden] { display: none; }
+#faces { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 10px 0 4px; }
+.face { padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; color: var(--muted); }
+.face.done { color: var(--y); border-color: rgba(92, 214, 124, 0.5); background: rgba(92, 214, 124, 0.1); }
+
+button, label { font: inherit; color: inherit; }
+label { display: flex; align-items: center; gap: 8px; padding: 6px 0 2px; cursor: pointer; }
+input[type="checkbox"] { accent-color: var(--z); width: 15px; height: 15px; }
+
+button {
+  background: rgba(143, 166, 201, 0.1);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+button:hover { background: rgba(143, 166, 201, 0.2); }
+button.wide { display: block; width: 100%; margin-top: 6px; text-align: left; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--z); outline-offset: 2px; }
+
+.seg { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.seg button { flex: 1 1 40%; padding: 6px 8px; font-size: 12.5px; }
+
+kbd {
+  float: right;
+  font: 11px ui-monospace, Consolas, monospace;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 0 5px;
+}
+.seg kbd { float: none; margin-left: 4px; }
+
+#log {
+  left: 16px;
+  bottom: 16px;
+  width: 340px;
+  max-height: 120px;
+  margin: 0;
+  overflow: hidden;
+  font: 11.5px/1.45 ui-monospace, Consolas, monospace;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+#log:empty { display: none; }
+
+@media (max-width: 760px) {
+  #hud { width: 220px; padding: 10px 12px; }
+  .v { font-size: 24px; }
+  .note, #log { display: none; }
+}
