@@ -28,8 +28,9 @@ last few lines the board prints show in the bottom-left corner.
 
 ## What you see
 
-- **Board** with its own axes: X red (the orange nose), Y green, Z blue. These are
-  the chip's axes, so the picture matches the numbers on serial.
+- **Board** with its own axes: X red, Y green (the nose, matching the real
+  board), Z blue. These are the chip's axes, so the picture matches the numbers
+  on serial.
 - **Gimbal rings**: yaw (blue), pitch (green) and roll (red), nested in that
   order, so you can see which angle each movement changes.
 - **Floor**: compass ring in degrees, a shadow of the board, and a needle showing
@@ -50,8 +51,10 @@ from there. **Absolute** shows the angles exactly as the board reports them.
 
 ## Notes
 
-- Positive pitch tips the nose *down* (right-hand rule about Y). Raise the front
-  edge and pitch goes negative.
+- The nose sits on the Y axis, so **roll** (rotation about X) is what tips it up
+  and down, and **pitch** (rotation about Y, the firmware's own convention) spins
+  the board around the nose instead. This only affects how the two look on
+  screen; the numbers still match the serial output exactly.
 - Heading is only steady against north if the magnetometer is calibrated;
   otherwise it is relative and drifts slowly.
 - It shows orientation only. Sliding the board across the desk won't move it:

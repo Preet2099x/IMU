@@ -9,13 +9,13 @@ THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 const HOVER = 6.6; // height of the board above the floor
 const RAD = Math.PI / 180;
 const TRAIL_MAX = 360;
-const NOSE_TIP = new THREE.Vector3(4.2, 0, 0);
+const NOSE_TIP = new THREE.Vector3(0, 3.7, 0); // the nose is on +Y, matching the board
 
 const VIEWS = {
   iso: [15, -17, 13],
   top: [0, -0.01, 34],
-  side: [0, -30, HOVER + 1], // nose points right: pitch reads as nose up/down
-  rear: [-30, 0, HOVER + 1], // looking along the nose: roll reads as a tilt
+  side: [-30, 0, HOVER + 1], // square to the nose: roll reads as nose up/down
+  rear: [0, -30, HOVER + 1], // looking along the nose: pitch reads as a tilt
 };
 
 function buildFloor(scene) {
@@ -86,13 +86,13 @@ export function createScene(container) {
   board.add(buildAxes());
   gimbal.roll.add(board);
 
-  const gyroArrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 0.3), 3, 0xd65cff, 0.8, 0.5);
+  const gyroArrow = new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 0.3), 3, 0xd65cff, 0.8, 0.5);
   gyroArrow.visible = false;
   board.add(gyroArrow);
 
   // Flat copy of the board on the floor, so tilt and turn are easy to read.
   const shadow = new THREE.Mesh(
-    new THREE.BoxGeometry(6.4, 4.2, 0.2),
+    new THREE.BoxGeometry(4.2, 6.4, 0.2),
     new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.4, depthWrite: false }),
   );
   shadow.matrixAutoUpdate = false;
@@ -101,7 +101,7 @@ export function createScene(container) {
 
   // Floor needle showing where the nose points, read against the compass ring.
   const needle = new THREE.Group();
-  needle.add(new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 0.04), 9.6, COLORS.z, 1.1, 0.6));
+  needle.add(new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 0.04), 9.6, COLORS.z, 1.1, 0.6));
   scene.add(needle);
 
   const trailGeo = new THREE.BufferGeometry();
