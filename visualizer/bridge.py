@@ -185,7 +185,7 @@ class SerialLink(threading.Thread):
                 self._halt.wait(1.0)
                 continue
             try:
-                ser = serial.Serial(port, self.baud, timeout=0.1)
+                ser = serial.serial_for_url(port, self.baud, timeout=0.1)  # COM port or socket://host:port
             except (serial.SerialException, OSError) as e:
                 self.hub.set_status("busy", port, f"Cannot open {port}. Close any other serial monitor. ({e})")
                 self._halt.wait(2.0)

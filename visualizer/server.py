@@ -103,7 +103,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser(description="3D IMU visualizer server")
-    ap.add_argument("--port", help="serial port such as COM7 (default: auto-detect the Teensy)")
+    ap.add_argument("--port", help="serial port such as COM7, or socket://imu.local:8888 for the ESP32 over WiFi (default: auto-detect the Teensy)")
     ap.add_argument("--http-port", type=int, default=8766)
     ap.add_argument("--demo", action="store_true", help="scripted route, no board needed")
     ap.add_argument("--replay", metavar="FILE", help="play back a session saved with --record")

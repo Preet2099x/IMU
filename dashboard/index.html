@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IMU Data</title>
+<style>
+  :root { --bg:#0f1418; --card:#182028; --text:#e8eef3; --dim:#8b9aa7; --x:#ff6b6b; --y:#5fd38d; --z:#5aa9ff; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f3f5f7; --card:#fff; --text:#141a20; --dim:#5d6b78; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.4 system-ui, sans-serif; padding:16px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  #status { color:var(--dim); font-size:14px; margin-bottom:16px; }
+  #status.ok::before, #status.bad::before { content:""; display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+  #status.ok::before { background:var(--y); } #status.bad::before { background:var(--x); }
+  .grid { display:grid; gap:12px; grid-template-columns:repeat(auto-fit, minmax(min(240px, 100%), 1fr)); }
+  .card { min-width:0; background:var(--card); border-radius:10px; padding:14px 16px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:0 0 10px; font-weight:600; }
+  .row { display:flex; justify-content:space-between; align-items:baseline; padding:3px 0; }
+  .row b { font-weight:600; }
+  .row span { font:600 20px ui-monospace, Consolas, monospace; font-variant-numeric:tabular-nums; }
+  .row small { color:var(--dim); font-size:12px; margin-left:4px; }
+  .X b { color:var(--x); } .Y b { color:var(--y); } .Z b { color:var(--z); }
+</style>
+</head>
+<body>
+<h1>IMU data</h1>
+<div id="status" class="bad">Waiting for the server...</div>
+<div class="grid" id="grid"></div>
+<script>
+const groups = [
+  ["Orientation", [["heading","Heading","°"],["pitch","Pitch","°"],["roll","Roll","°"]], 1],
+  ["Accelerometer", [["ax","X","g"],["ay","Y","g"],["az","Z","g"]], 3],
+  ["Gyroscope", [["gx","X","°/s"],["gy","Y","°/s"],["gz","Z","°/s"]], 2],
+  ["Magnetometer", [["mx","X","counts"],["my","Y","counts"],["mz","Z","counts"]], 0],
+];
+const grid = document.getElementById("grid");
+const cells = {};
+for (const [title, rows, digits] of groups) {
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = `<h2>${title}</h2>`;
+  for (const [key, label, unit] of rows) {
+    const row = document.createElement("div");
+    row.className = "row " + (["X","Y","Z"].includes(label) ? label : "");
+    row.innerHTML = `<b>${label}</b><div><span>–</span><small>${unit}</small></div>`;
+    card.appendChild(row);
+    cells[key] = [row.querySelector("span"), digits];
+  }
+  grid.appendChild(card);
+}
+const status = document.getElementById("status");
+async function tick() {
+  try {
+    const r = await (await fetch("/data", {cache:"no-store"})).json();
+    const live = r.connected && r.age !== null && r.age < 2;
+    status.className = live ? "ok" : "bad";
+    status.textContent = live ? r.message : (r.connected ? r.message + " - waiting for data (board starting up?)" : r.message);
+    if (r.data) for (const k in cells) cells[k][0].textContent = r.data[k].toFixed(cells[k][1]);
+  } catch (e) {
+    status.className = "bad";
+    status.textContent = "Server not reachable";
+  }
+}
+setInterval(tick, 100); tick();
+</script>
+</body>
+</html>
