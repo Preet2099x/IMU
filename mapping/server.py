@@ -4,8 +4,9 @@
 Serves ./web and streams the board's attitude to the browser over
 Server-Sent Events. Only listens on localhost.
 
-    python server.py            # find the Teensy automatically
+    python server.py            # find the board: Teensy or ESP32 on USB, else the ESP32 on WiFi
     python server.py --port COM7
+    python server.py --port socket://192.168.1.50:8888      # the ESP32 over WiFi at a given address
     python server.py --demo     # synthetic motion, no board needed
 """
 import argparse
@@ -86,7 +87,8 @@ class Handler(SimpleHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser(description="3D IMU viewer server")
-    ap.add_argument("--port", help="serial port such as COM7 (default: auto-detect the Teensy)")
+    ap.add_argument("--port", help="COM7, or socket://<address>:8888 for the ESP32 over WiFi "
+                                   "(default: find the Teensy or ESP32 on USB, else the ESP32 on any WiFi network)")
     ap.add_argument("--http-port", type=int, default=8765)
     ap.add_argument("--demo", action="store_true", help="synthetic motion, no board needed")
     ap.add_argument("--skip-cal", action="store_true",

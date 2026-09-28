@@ -1,0 +1,147 @@
+{
+  "windows": 76,
+  "accel_noise_rms_mps2": 0.045635291591306915,
+  "resting_horizontal_accel_error_mps2": {
+    "median": 0.0017945374849840218,
+    "p90": 0.006637509880984129,
+    "max": 0.059878195584598774
+  },
+  "resting_tilt_equivalent_deg": {
+    "median": 0.010484663431594137,
+    "p90": 0.03877994356954037
+  },
+  "gyro_residual_dps": {
+    "median": 0.011718738652012787,
+    "p90": 0.02443612522815631
+  },
+  "still_10s_drift_m": {
+    "no_correction_median": 0.09488500948467703,
+    "no_correction_p90": 0.3933577204495667,
+    "no_correction_max": 4.655837307798906,
+    "bias_removed_median": 0.15577192841063658,
+    "bias_removed_p90": 0.31311198337785795
+  },
+  "growth_at_seconds": {
+    "1": {
+      "measured resting accel error (0.002 m/s\u00b2)": 0.0008974501844937913,
+      "tilt error 0.5\u00b0": 0.04279823550645071,
+      "tilt error 1\u00b0": 0.08559647101290142,
+      "tilt error 3\u00b0 (during a move)": 0.25678941303870423,
+      "gyro bias 0.01\u00b0/s left uncorrected (t\u00b3)": 0.00033449524867219186,
+      "accel noise only (random walk)": 0.002151431751156723
+    },
+    "2": {
+      "measured resting accel error (0.002 m/s\u00b2)": 0.0035894117897439055,
+      "tilt error 0.5\u00b0": 0.17117439358903289,
+      "tilt error 1\u00b0": 0.34234878717806577,
+      "tilt error 3\u00b0 (during a move)": 1.0270463615341974,
+      "gyro bias 0.01\u00b0/s left uncorrected (t\u00b3)": 0.00267509323293544,
+      "accel noise only (random walk)": 0.006084920546139117
+    },
+    "5": {
+      "measured resting accel error (0.002 m/s\u00b2)": 0.02243551327065992,
+      "tilt error 0.5\u00b0": 1.0699205340376707,
+      "tilt error 1\u00b0": 2.1398410680753415,
+      "tilt error 3\u00b0 (during a move)": 6.419523204226025,
+      "gyro bias 0.01\u00b0/s left uncorrected (t\u00b3)": 0.04180799402787385,
+      "accel noise only (random walk)": 0.02405343183670395
+    },
+    "10": {
+      "measured resting accel error (0.002 m/s\u00b2)": 0.08974807864226657,
+      "tilt error 0.5\u00b0": 4.279969487275488,
+      "tilt error 1\u00b0": 8.559938974550976,
+      "tilt error 3\u00b0 (during a move)": 25.67981692365293,
+      "gyro bias 0.01\u00b0/s left uncorrected (t\u00b3)": 0.3345307708546352,
+      "accel noise only (random walk)": 0.0680350989249015
+    },
+    "30": {
+      "measured resting accel error (0.002 m/s\u00b2)": 0.8077342730266186,
+      "tilt error 0.5\u00b0": 38.51980003004183,
+      "tilt error 1\u00b0": 77.03960006008366,
+      "tilt error 3\u00b0 (during a move)": 231.11880018025096,
+      "gyro bias 0.01\u00b0/s left uncorrected (t\u00b3)": 9.032361141611906,
+      "accel noise only (random walk)": 0.3535210552537815
+    }
+  },
+  "slide_and_back": {
+    "seconds": 25.0,
+    "true_final_position_m": 0.0,
+    "tracked_final_m": [
+      0.31427923532310736,
+      0.8808430586330348
+    ],
+    "tracked_max_excursion_m": 0.9275449583067535
+  },
+  "trackers_on_real_logs": [
+    {
+      "log": "left_and_back.viz",
+      "seconds": 239.981,
+      "simple_max_m": 1.114862151828509,
+      "simple_final_m": 0.38220605224212084,
+      "kalman_max_m": 0.8927684507136077,
+      "kalman_final_m": 0.5012702379819122
+    },
+    {
+      "log": "orient_20260924_130945.viz",
+      "seconds": 115.8789999999999,
+      "simple_max_m": 9.114543009031447,
+      "simple_final_m": 9.114543009031447,
+      "kalman_max_m": 9.928906620768585,
+      "kalman_final_m": 9.173018896802537
+    },
+    {
+      "log": "orient_20260924_131143.viz",
+      "seconds": 104.38299999999981,
+      "simple_max_m": 1.7431910670727953,
+      "simple_final_m": 0.3845115921495928,
+      "kalman_max_m": 4.723806833785932,
+      "kalman_final_m": 0.7723561596639655
+    },
+    {
+      "log": "orient_20260924_131329.viz",
+      "seconds": 152.11400000000003,
+      "simple_max_m": 11.947437710842934,
+      "simple_final_m": 11.91297483799585,
+      "kalman_max_m": 31.36011621977752,
+      "kalman_final_m": 20.627172490338637
+    },
+    {
+      "log": "orient_20260924_131603.viz",
+      "seconds": 108.80399999999986,
+      "simple_max_m": 6.14885246517113,
+      "simple_final_m": 3.5431924894510467,
+      "kalman_max_m": 11.11338200363238,
+      "kalman_final_m": 8.598540908997219
+    },
+    {
+      "log": "slide30.viz#1",
+      "seconds": 172.586,
+      "simple_max_m": 2.9592877958679296,
+      "simple_final_m": 2.8849668334159997,
+      "kalman_max_m": 5.48755860822122,
+      "kalman_final_m": 5.48755860822122
+    },
+    {
+      "log": "slide30.viz#2",
+      "seconds": 259.149,
+      "simple_max_m": 2.21949269255686,
+      "simple_final_m": 0.8785848768526148,
+      "kalman_max_m": 2.512414433951399,
+      "kalman_final_m": 0.7865331876798646
+    },
+    {
+      "log": "track3d_20260924_130019.viz",
+      "seconds": 351.8159999999999,
+      "simple_max_m": 30.30856893000776,
+      "simple_final_m": 7.408614747073823,
+      "kalman_max_m": 36.51346551399495,
+      "kalman_final_m": 9.18943973670857
+    }
+  ],
+  "specific_force_deviation_from_1g": {
+    "at_rest_median_g": 0.02185153993041311,
+    "at_rest_p95_g": 0.028251326171044238,
+    "rotating_over_20dps_median_g": 0.09259511671623333,
+    "rotating_over_20dps_p95_g": 0.5120258180366625
+  }
+}

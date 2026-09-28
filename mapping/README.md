@@ -11,13 +11,20 @@ Close any serial monitor first (only one program can hold the port), then:
 python mapping/server.py
 ```
 
-or double-click `mapping/run_viewer.bat`. It finds the Teensy by its USB ID,
+or double-click `mapping/run_viewer.bat`. It finds the board by itself (the Teensy
+on USB, else the ESP32 on USB, else the ESP32 over WiFi on whatever network this
+computer is on; see `boardfind.py`),
 opens the viewer in your browser at http://localhost:8765 and reconnects if you
 re-flash or unplug the board. Needs `pyserial` (`pip install pyserial`).
 
+With the ESP32, `--port socket://<address>:8888` picks WiFi even when it is
+also plugged in (`python boardfind.py` prints the address). Its heading starts at 0 where the board first settled (it has no
+magnetometer calibration), and only one program can use its WiFi connection at a
+time: opening this viewer disconnects `visualizer/track3d.py`, and the other way round.
+
 | Option | Meaning |
 |---|---|
-| `--port COM7` | Use a specific port instead of auto-detecting |
+| `--port COM7` | Use a specific port instead of auto-detecting (or `socket://<address>:8888` for the ESP32 over WiFi) |
 | `--demo` | Synthetic motion, no board needed |
 | `--skip-cal` | Skip the board's 30 s magnetometer calibration prompt automatically |
 | `--http-port N` | Serve on another port (default 8765) |

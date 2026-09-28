@@ -7,7 +7,13 @@ import re
 import threading
 import time
 
-TEENSY_VID_PID = (0x16C0, 0x0483)
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # boardfind.py lives in the project root
+import boardfind  # noqa: E402
+
+TEENSY_VID_PID = boardfind.TEENSY_VID_PID
 
 _NUM = r"(-?\d+(?:\.\d+)?)"
 ATT_RE = re.compile(
@@ -78,13 +84,16 @@ def handle_line(hub, text):
         hub.publish({"type": "log", "text": text})
 
 
-def find_teensy_port():
-    from serial.tools import list_ports
+def find_board_port():
+    """The Teensy on USB, else the ESP32 on USB, else the ESP32 on WiFi (any network)."""
+    return boardfind.find_port()
 
-    for p in list_ports.comports():
-        if (p.vid, p.pid) == TEENSY_VID_PID:
-            return p.device
-    return None
+
+find_teensy_port = find_board_port  # older name
+
+
+def open_port(port, baud):
+    return boardfind.open_port(port, baud)
 
 
 class SerialLink(threading.Thread):
@@ -108,14 +117,14 @@ class SerialLink(threading.Thread):
         import serial
 
         while not self._halt.is_set():
-            port = self.port or find_teensy_port()
+            port = self.port or find_board_port()
             if not port:
-                self.hub.set_status("waiting", None, "No Teensy found (USB 16C0:0483). Plug it in.")
+                self.hub.set_status("waiting", None, boardfind.not_found_message())
                 self._halt.wait(1.0)
                 continue
             try:
-                ser = serial.Serial(port, self.baud, timeout=0.1)
-            except (serial.SerialException, OSError) as e:
+                ser = open_port(port, self.baud)
+            except (serial.SerialException, OSError, ValueError) as e:
                 self.hub.set_status("busy", port, f"Cannot open {port}. Close any other serial monitor. ({e})")
                 self._halt.wait(2.0)
                 continue

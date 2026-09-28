@@ -1,5 +1,6 @@
 // Copy to wifi_config.h (git-ignored) and fill in your network.
 #pragma once
+// The ESP32 joins 2.4 GHz networks only (a phone hotspot must be set to 2.4 GHz).
 #define WIFI_SSID "your-network-name"
 #define WIFI_PASSWORD "your-password"
 // Fixed address on the network above (comma separated). Delete both lines to use DHCP.

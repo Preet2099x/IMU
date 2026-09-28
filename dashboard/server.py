@@ -1,13 +1,15 @@
 """Live numbers from the board in a web page: accelerometer, gyro, magnetometer
 (x, y, z) plus pitch, roll and heading.
 
-    python dashboard/server.py --port socket://192.168.137.200:8888     (WiFi)
+    python dashboard/server.py                                          (finds the board itself)
+    python dashboard/server.py --port socket://<address>:8888           (a given WiFi address)
     python dashboard/server.py --port COM8                              (USB)
 
 Needs pyserial. Only one program can talk to the board's WiFi port at a time,
 so close the 3D visualizer first."""
 import argparse
 import json
+import sys
 import threading
 import time
 import webbrowser
@@ -15,6 +17,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import serial
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # boardfind.py lives in the project root
+import boardfind  # noqa: E402
 
 HERE = Path(__file__).parent
 KEYS = ["ms", "heading", "pitch", "roll", "ax", "ay", "az", "gx", "gy", "gz", "mx", "my", "mz"]
@@ -32,10 +37,18 @@ def parse_log(line):
         return None
 
 
-def reader(port, baud, skip_cal):
+def reader(port_arg, baud, skip_cal):
     while True:
+        port = port_arg
+        if port_arg == "auto":  # the address changes between networks and boots, so look it up each time
+            state.update(connected=False, message="Looking for the board (USB, or WiFi on this network)...")
+            port = boardfind.find_port()
+            if not port:
+                state.update(connected=False, message=boardfind.not_found_message())
+                time.sleep(2)
+                continue
         try:
-            ser = serial.serial_for_url(port, baud, timeout=0.1)
+            ser = boardfind.open_port(port, baud)
         except (serial.SerialException, OSError) as e:
             state.update(connected=False, message=f"Cannot open {port}: {e}")
             time.sleep(2)
@@ -93,7 +106,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser(description="Live IMU numbers in the browser")
-    ap.add_argument("--port", required=True, help="COM8, or socket://192.168.137.200:8888 for WiFi")
+    ap.add_argument("--port", default="auto", help="COM8, socket://<address>:8888 for WiFi, or 'auto' (default) to find the board")
     ap.add_argument("--http-port", type=int, default=8767)
     ap.add_argument("--skip-cal", action="store_true", help="skip the board's 30 s magnetometer calibration")
     ap.add_argument("--host", default="127.0.0.1", help="use 0.0.0.0 to open the page from a phone on the same WiFi")

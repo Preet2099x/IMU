@@ -1,166 +1,64 @@
-// ESP32 build of main.cpp (same firmware, same serial protocol). Differences: the
-// gyro FIFO read chunk fits the ESP32 Wire buffer. Wiring: SDA=GPIO21, SCL=GPIO22.
+// ESP32 firmware for 3D tracking with the BMI088 (accelerometer + gyro) and BMM350
+// (magnetometer). Wiring: SDA = GPIO21, SCL = GPIO22.
+//
+// What it does differently from the orientation firmware (src/main.cpp):
+//   * Both the gyro and the accelerometer are read from their on-chip FIFOs at
+//     400 Hz, so no sample is lost and every sample gets its own time.
+//   * Everything is tracked on the board, sample by sample (src/tracker3d.h): the
+//     orientation from the gyro, and the position from the accelerometer with
+//     gravity removed. The accelerometer only corrects tilt while the board is
+//     still, never during a move.
+//   * Sensor reading and tracking run in their own task, so WiFi or a slow
+//     connection can never make it miss samples.
+//   * No magnetometer calibration at startup: heading is relative to where the
+//     board faced when it first settled. The magnetometer is still read and
+//     reported (uncalibrated) in the LOG stream.
+//
+// Talking to it: USB serial (115200) and TCP port 8888 over WiFi carry the same
+// text protocol. Single letters at the start of a line:
+//   t  keep the tracking stream on (TRK at 50 Hz, STAT at 1 Hz) for 3 s
+//   r  as t, plus every raw sample (A/G lines, WiFi only) for replaying offline
+//   v  the orientation stream the older viewers read (VIZ at 50 Hz) for 3 s
+//   l  the dashboard stream (LOG at 20 Hz) for 3 s
+//   h  back to the plain text line
+//   s  ignored (the older viewers send it to skip the Teensy's magnetometer calibration)
+// With no stream requested it prints, 10 times a second, the same line as the Teensy
+// firmware (so the mapping viewer reads it), with the tracked position after it:
+//   Heading: 12.3  Pitch: -1.0  Roll: 2.0  Gyro(dps) X: 0.01 Y: -0.02 Z: 0.00   x ... m
+//   z  position back to zero        y  current heading becomes heading 0
+// Lines:
+//   c,ox,oy,oz,sx,sy,sz  accelerometer calibration for this session (g units)
+//   C,ox,oy,oz,sx,sy,sz  the same, and remembered across restarts
+// Software update over WiFi: pio run -e esp32_ota -t upload
 #include <Arduino.h>
-#include <Wire.h>
-#include <math.h>
-#include <WiFi.h>
-#include <ESPmDNS.h>
 #include <ArduinoOTA.h>
+#include <ESPmDNS.h>
+#include <Preferences.h>
+#include <WiFi.h>
+#include <Wire.h>
+#include <esp_timer.h>
+#include <lwip/sockets.h>
+#include <math.h>
+
+#include "tracker3d.h"
 #include "wifi_config.h"
 
-// I2C addresses, confirmed by chip-ID readback on this board:
-//   0x18 = BMI088 accelerometer (chip ID 0x1E)
-//   0x68 = BMI088 gyroscope     (chip ID 0x0F)
-//   0x15 = BMM350 magnetometer  (ADSEL high)
-constexpr uint8_t ACC_ADDR = 0x18;
-constexpr uint8_t GYR_ADDR = 0x68;
-constexpr uint8_t MAG_ADDR = 0x15;
+using trk::Q;
+using trk::V3;
 
-// Scale factors must match the ranges configured in setup().
-constexpr float ACC_RANGE_G = 6.0f;                         // ACC_RANGE = 0x01
-constexpr float ACC_LSB_PER_G = 32768.0f / ACC_RANGE_G;
-// A narrow gyro range clips on taps and bumps, and clipped spikes integrate
-// into a permanent heading error, so run at full scale.
-constexpr float GYR_RANGE_DPS = 2000.0f;                    // GYRO_RANGE = 0x00
-constexpr float GYR_LSB_PER_DPS = 32768.0f / GYR_RANGE_DPS;
+// ---------------------------------------------------------------- sensors
 
-// Every gyro sample is pulled from the BMI088's on-chip FIFO and integrated
-// over its own sample period. Polling the rate register instead means a loop
-// stall stretches one reading across the gap, and during fast motion that
-// integrates into a permanent heading error.
-constexpr float GYRO_ODR_HZ = 400.0f;     // GYRO_BANDWIDTH 0x03: ODR 400 Hz, 47 Hz filter
-constexpr uint8_t GYRO_FIFO_MODE = 0x40;  // FIFO_CONFIG_1: stop-at-full, overrun flagged
-constexpr int GYRO_FIFO_CHUNK_FRAMES = 20; // 120 bytes, fits the ESP32 Wire's 128-byte buffer
-constexpr uint32_t ACCEL_READ_INTERVAL_US = 5000;
+constexpr uint8_t ACC_ADDR = 0x18;  // BMI088 accelerometer (chip ID 0x1E)
+constexpr uint8_t GYR_ADDR = 0x68;  // BMI088 gyroscope (chip ID 0x0F)
+constexpr uint8_t MAG_ADDR = 0x15;  // BMM350
 
-// Gyro bias drifts as the BMI088 warms up, and accel can't observe yaw, so any
-// leftover Z bias integrates straight into heading. While the board is still,
-// keep nudging the bias toward what the gyro reads.
-constexpr float STILL_GYRO_DPS = 0.5f;       // smoothed rate below this counts as still
-constexpr float STILL_ACCEL_TOL_G = 0.1f;    // |accel| must be this close to 1g
-constexpr float STILL_FILTER_TAU_S = 0.1f;   // smoothing of the rate used for detection
-constexpr float STILL_TIME_REQUIRED_S = 1.0f;
-constexpr float BIAS_ADAPT_TAU_S = 2.5f;
-constexpr uint32_t PRINT_INTERVAL_MS = 100;  // 10 Hz
-
-// Optional fast stream for the 3D visualizer. Sending 'v' at least every
-// VIZ_TIMEOUT_MS swaps the text line for a 50 Hz CSV line; 'h' (or silence)
-// switches back, so a plain serial monitor still sees the normal output.
-constexpr uint32_t VIZ_INTERVAL_MS = 20;
-constexpr uint32_t VIZ_TIMEOUT_MS = 3000;
-constexpr uint32_t LOG_INTERVAL_MS = 50;   // 20 Hz for the long-run log
-
-// Mahony proportional gain: how hard accel/mag pull the estimate toward
-// vertical/north. There is deliberately no integral term: bias is learned
-// explicitly while at rest, and an integral learned in one orientation turns
-// into a false heading rate once the board is turned.
-constexpr float TWO_KP = 2.0f * 0.5f;
-
-// While the board is being bumped or moved, accel measures more than gravity.
-// Feeding that in tilts the estimate and can leak into heading, so skip it.
-constexpr float ACCEL_REJECT_TOL_G = 0.15f;
-
-// Hard/soft iron correction, in raw magnetometer counts, filled in by the
-// startup calibration. Yaw is only meaningful once these are valid.
-bool useMagInFusion = false;
-float magOffset[3] = {0.0f, 0.0f, 0.0f};
-float magScale[3] = {1.0f, 1.0f, 1.0f};
-
-// The BMM350 is a separate die from the BMI088 and need not share its axis
-// orientation. Solved for during calibration.
-int magAxisMap[3] = {0, 1, 2};
-float magAxisSign[3] = {1.0f, 1.0f, 1.0f};
-
-constexpr uint32_t MAG_CAL_DURATION_MS = 30000;
-constexpr uint32_t MAG_CAL_SAMPLE_INTERVAL_MS = 20; // 50 Hz
-constexpr int MAG_CAL_MAX_SAMPLES = 1600;
-
-struct CalSample {
-  float a[3];
-  float m[3];
-};
-CalSample calSamples[MAG_CAL_MAX_SAMPLES];
-int calSampleCount = 0;
-
-float gyroBiasDps[3] = {0.0f, 0.0f, 0.0f};
-float magNoiseFloor[3] = {0.0f, 0.0f, 0.0f};
-
-// Quaternion of the sensor frame relative to the earth frame.
-float q0 = 1.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f;
-
-// The serial protocol is also served over WiFi: TCP port 8888, hostname "imu"
-// (imu.local). Everything printed goes to USB serial and to the connected client,
-// and commands are accepted from either.
-constexpr uint16_t TCP_PORT = 8888;
-WiFiServer tcpServer(TCP_PORT);
-WiFiClient tcpClient;
-
-void pollTcpClient() {
-  if (tcpClient && tcpClient.connected()) return;
-  WiFiClient c = tcpServer.available();
-  if (c) {
-    c.setNoDelay(true);
-    tcpClient = c;
-  }
-}
-
-class Link : public Print {
- public:
-  size_t write(uint8_t b) override { return write(&b, 1); }
-  size_t write(const uint8_t *buf, size_t n) override {
-    Serial.write(buf, n);
-    if (tcpClient && tcpClient.connected()) tcpClient.write(buf, n);
-    return n;
-  }
-  int available() {
-    pollTcpClient();
-    return Serial.available() + (tcpClient && tcpClient.connected() ? tcpClient.available() : 0);
-  }
-  int read() {
-    if (Serial.available()) return Serial.read();
-    if (tcpClient && tcpClient.connected() && tcpClient.available()) return tcpClient.read();
-    return -1;
-  }
-};
-Link out;
-
-void connectWiFi() {
-  WiFi.persistent(false);
-  WiFi.disconnect(true, true);
-  delay(100);
-  WiFi.mode(WIFI_STA);
-  WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t info) {
-    Serial.printf("\nWiFi: disconnected, reason %d\n", info.wifi_sta_disconnected.reason);
-  }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
-  int found = WiFi.scanNetworks();
-  for (int i = 0; i < found; i++)
-    Serial.printf("WiFi: sees \"%s\" ch%d %ddBm\n", WiFi.SSID(i).c_str(), WiFi.channel(i), WiFi.RSSI(i));
-#ifdef WIFI_STATIC_IP
-  // A fixed address, so the viewer and OTA uploads always know where the board is.
-  WiFi.config(IPAddress(WIFI_STATIC_IP), IPAddress(WIFI_GATEWAY), IPAddress(255, 255, 255, 0),
-              IPAddress(WIFI_GATEWAY));
-#endif
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.printf("WiFi: connecting to \"%s\"", WIFI_SSID);
-  uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-    delay(300);
-    Serial.print('.');
-  }
-  Serial.println();
-  if (WiFi.status() == WL_CONNECTED) {
-    WiFi.setSleep(false); // power-save makes the board drop packets and answer slowly
-    MDNS.begin("imu");
-    ArduinoOTA.setHostname("imu");
-    ArduinoOTA.setPassword(OTA_PASSWORD);
-    ArduinoOTA.begin(); // software upload: pio run -e esp32_ota -t upload
-    tcpServer.begin();
-    Serial.printf("WiFi: connected, IP %s, TCP port %u (imu.local)\n",
-                  WiFi.localIP().toString().c_str(), TCP_PORT);
-  } else {
-    Serial.println("WiFi: not connected (USB serial still works)");
-  }
-}
+constexpr float G0 = 9.80665f;
+constexpr float ACC_LSB_PER_G = 32768.0f / 12.0f;        // ACC_RANGE 0x02: +-12 g
+constexpr float GYR_LSB_PER_DPS = 32768.0f / 2000.0f;    // GYRO_RANGE 0x00: +-2000 deg/s
+constexpr float DEG = 0.01745329252f;
+constexpr float ODR_HZ = 400.0f;  // both sensors
+constexpr int GYRO_CHUNK = 20;    // frames per I2C read: 120 bytes, fits the 128-byte Wire buffer
+constexpr int ACC_CHUNK = 17;     // 119 bytes
 
 void writeReg(uint8_t addr, uint8_t reg, uint8_t val) {
   Wire.beginTransmission(addr);
@@ -178,52 +76,72 @@ bool readBytes(uint8_t addr, uint8_t reg, uint8_t *buf, uint8_t len) {
   return true;
 }
 
-void setupBMI088Accel() {
-  writeReg(ACC_ADDR, 0x7E, 0xB6); // ACC_SOFTRESET
+void setupAccel() {
+  writeReg(ACC_ADDR, 0x7E, 0xB6);  // soft reset
   delay(5);
-  writeReg(ACC_ADDR, 0x7D, 0x04); // ACC_PWR_CTRL: enable accelerometer
+  writeReg(ACC_ADDR, 0x7D, 0x04);  // ACC_PWR_CTRL: on
   delay(5);
-  writeReg(ACC_ADDR, 0x7C, 0x00); // ACC_PWR_CONF: active mode
-  writeReg(ACC_ADDR, 0x40, 0xA9); // ACC_CONF: normal filter, ODR 200 Hz
-  writeReg(ACC_ADDR, 0x41, 0x01); // ACC_RANGE: ±6g
+  writeReg(ACC_ADDR, 0x7C, 0x00);  // ACC_PWR_CONF: active
+  // ODR 400 Hz with 4x oversampling: a 37 Hz filter, close to the gyro's 47 Hz,
+  // so both see a movement with about the same delay.
+  writeReg(ACC_ADDR, 0x40, 0x8A);  // ACC_CONF
+  writeReg(ACC_ADDR, 0x41, 0x02);  // ACC_RANGE: +-12 g (a knock on the table reached 6 g and clipped)
+  writeReg(ACC_ADDR, 0x45, 0x80);  // FIFO_DOWNS: filtered data, no downsampling
+  writeReg(ACC_ADDR, 0x48, 0x02);  // FIFO_CONFIG_0: stream mode (oldest dropped if full)
+  writeReg(ACC_ADDR, 0x49, 0x50);  // FIFO_CONFIG_1: accelerometer data into the FIFO
   delay(50);
 }
 
-void setupBMI088Gyro() {
-  writeReg(GYR_ADDR, 0x14, 0xB6); // GYRO_SOFTRESET
+void setupGyro() {
+  writeReg(GYR_ADDR, 0x14, 0xB6);  // soft reset
   delay(35);
-  writeReg(GYR_ADDR, 0x0F, 0x00);           // GYRO_RANGE: ±2000dps
-  writeReg(GYR_ADDR, 0x10, 0x03);           // GYRO_BANDWIDTH: ODR 400 Hz, 47 Hz filter
-  writeReg(GYR_ADDR, 0x11, 0x00);           // GYRO_LPM1: normal mode
-  writeReg(GYR_ADDR, 0x15, 0x40);           // GYRO_INT_CTRL: fifo_en
-  writeReg(GYR_ADDR, 0x3D, 0x00);           // FIFO_CONFIG_0: no tags (6-byte frames)
-  writeReg(GYR_ADDR, 0x3E, GYRO_FIFO_MODE); // FIFO_CONFIG_1: FIFO mode
+  writeReg(GYR_ADDR, 0x0F, 0x00);  // GYRO_RANGE: +-2000 deg/s (a narrower range clips on bumps)
+  writeReg(GYR_ADDR, 0x10, 0x03);  // GYRO_BANDWIDTH: ODR 400 Hz, 47 Hz filter
+  writeReg(GYR_ADDR, 0x11, 0x00);  // GYRO_LPM1: normal mode
+  writeReg(GYR_ADDR, 0x15, 0x40);  // GYRO_INT_CTRL: fifo_en
+  writeReg(GYR_ADDR, 0x3D, 0x00);  // FIFO_CONFIG_0: no tags (6-byte frames)
+  writeReg(GYR_ADDR, 0x3E, 0x40);  // FIFO_CONFIG_1: stop when full, overrun flagged
   delay(30);
 }
 
-// Writing FIFO_CONFIG_1 clears the buffer and its overrun flag.
-void flushGyroFifo() {
-  writeReg(GYR_ADDR, 0x3E, GYRO_FIFO_MODE);
+void flushGyroFifo() { writeReg(GYR_ADDR, 0x3E, 0x40); }  // rewriting the mode clears it
+
+void setupMag() {
+  writeReg(MAG_ADDR, 0x7E, 0xB6);  // soft reset
+  delay(50);
+  writeReg(MAG_ADDR, 0x06, 0x01);  // PMU_CMD: normal mode
+  writeReg(MAG_ADDR, 0x04, 0x04);  // PMU_CMD_AGGR_SET: ODR/averaging
+  delay(10);
+  writeReg(MAG_ADDR, 0x06, 0x07);  // PMU_CMD: magnetic reset
+  delay(20);
 }
 
-// Drains up to maxFrames raw samples from the gyro FIFO. Returns the count;
-// overrun reports that samples were lost since the last flush.
-int readGyroFifo(int16_t frames[][3], int maxFrames, bool &overrun) {
+int32_t sext24(uint32_t v) {
+  if (v & 0x00800000) v |= 0xFF000000;
+  return (int32_t)v;
+}
+
+bool readMagRaw(float out[3]) {
+  uint8_t b[11];  // 2 dummy bytes + 9 data bytes
+  if (!readBytes(MAG_ADDR, 0x31, b, 11)) return false;
+  for (int k = 0; k < 3; k++)
+    out[k] = sext24((uint32_t)b[2 + 3 * k] | ((uint32_t)b[3 + 3 * k] << 8) | ((uint32_t)b[4 + 3 * k] << 16));
+  return true;
+}
+
+// Gyro FIFO: 6-byte frames. Returns the count; overrun means frames were lost.
+int readGyroFifo(int16_t (*frames)[3], int maxFrames, bool &overrun) {
   uint8_t status;
   overrun = false;
   if (!readBytes(GYR_ADDR, 0x0E, &status, 1)) return 0;
   overrun = status & 0x80;
-
-  int available = status & 0x7F;
-  if (available > maxFrames) available = maxFrames;
-
+  int avail = status & 0x7F;
+  if (avail > maxFrames) avail = maxFrames;
   int got = 0;
-  uint8_t buf[GYRO_FIFO_CHUNK_FRAMES * 6];
-  while (got < available) {
-    int chunk = min(available - got, GYRO_FIFO_CHUNK_FRAMES);
-    // FIFO_DATA doesn't advance the register address, so a burst read keeps
-    // popping consecutive frames.
-    if (!readBytes(GYR_ADDR, 0x3F, buf, chunk * 6)) break;
+  uint8_t buf[GYRO_CHUNK * 6];
+  while (got < avail) {
+    int chunk = min(avail - got, GYRO_CHUNK);
+    if (!readBytes(GYR_ADDR, 0x3F, buf, chunk * 6)) break;  // FIFO_DATA keeps popping frames
     for (int i = 0; i < chunk; i++) {
       const uint8_t *b = buf + i * 6;
       frames[got + i][0] = (int16_t)(b[0] | (b[1] << 8));
@@ -235,629 +153,561 @@ int readGyroFifo(int16_t frames[][3], int maxFrames, bool &overrun) {
   return got;
 }
 
-void setupBMM350() {
-  writeReg(MAG_ADDR, 0x7E, 0xB6); // CMD: soft reset
-  delay(50);
-  writeReg(MAG_ADDR, 0x06, 0x01); // PMU_CMD: normal mode
-  writeReg(MAG_ADDR, 0x04, 0x04); // PMU_CMD_AGGR_SET: ODR/averaging
-  delay(10);
-  writeReg(MAG_ADDR, 0x06, 0x07); // PMU_CMD: BR (magnetic reset)
-  delay(20);
-}
-
-// Accelerometer calibration, set over serial by the 3D visualizer as
-// "c,ox,oy,oz,sx,sy,sz": calibrated = (raw - offset) * scale, per axis, in g.
-// Every use of the accelerometer (tilt, motion detection) goes through it.
-float accOffset[3] = {0.0f, 0.0f, 0.0f};
-float accScale[3] = {1.0f, 1.0f, 1.0f};
-float accRaw[3] = {0.0f, 0.0f, 1.0f}; // last reading before the calibration is applied
-
-bool readAccelG(float &x, float &y, float &z) {
-  uint8_t b[6];
-  if (!readBytes(ACC_ADDR, 0x12, b, 6)) return false;
-  accRaw[0] = (int16_t)(b[0] | (b[1] << 8)) / ACC_LSB_PER_G;
-  accRaw[1] = (int16_t)(b[2] | (b[3] << 8)) / ACC_LSB_PER_G;
-  accRaw[2] = (int16_t)(b[4] | (b[5] << 8)) / ACC_LSB_PER_G;
-  x = (accRaw[0] - accOffset[0]) * accScale[0];
-  y = (accRaw[1] - accOffset[1]) * accScale[1];
-  z = (accRaw[2] - accOffset[2]) * accScale[2];
-  return true;
-}
-
-bool readGyroDps(float &x, float &y, float &z) {
-  uint8_t b[6];
-  if (!readBytes(GYR_ADDR, 0x02, b, 6)) return false;
-  x = (int16_t)(b[0] | (b[1] << 8)) / GYR_LSB_PER_DPS - gyroBiasDps[0];
-  y = (int16_t)(b[2] | (b[3] << 8)) / GYR_LSB_PER_DPS - gyroBiasDps[1];
-  z = (int16_t)(b[4] | (b[5] << 8)) / GYR_LSB_PER_DPS - gyroBiasDps[2];
-  return true;
-}
-
-int32_t sext24(uint32_t v) {
-  if (v & 0x00800000) v |= 0xFF000000;
-  return (int32_t)v;
-}
-
-bool readMagRawCounts(float out[3]) {
-  uint8_t b[11]; // 2 dummy bytes + 9 data bytes
-  if (!readBytes(MAG_ADDR, 0x31, b, 11)) return false;
-  out[0] = sext24((uint32_t)b[2] | ((uint32_t)b[3] << 8) | ((uint32_t)b[4] << 16));
-  out[1] = sext24((uint32_t)b[5] | ((uint32_t)b[6] << 8) | ((uint32_t)b[7] << 16));
-  out[2] = sext24((uint32_t)b[8] | ((uint32_t)b[9] << 8) | ((uint32_t)b[10] << 16));
-  return true;
-}
-
-// Applies hard/soft iron correction, then maps the magnetometer's axes onto the
-// accel/gyro body frame.
-void applyMagCalibration(const float raw[3], float out[3]) {
-  float c[3];
-  for (int i = 0; i < 3; i++) c[i] = (raw[i] - magOffset[i]) * magScale[i];
-  for (int i = 0; i < 3; i++) out[i] = magAxisSign[i] * c[magAxisMap[i]];
-}
-
-bool readMag(float &x, float &y, float &z) {
-  float raw[3], cal[3];
-  if (!readMagRawCounts(raw)) return false;
-  applyMagCalibration(raw, cal);
-  x = cal[0];
-  y = cal[1];
-  z = cal[2];
-  return true;
-}
-
-// Averages the gyro at rest so the constant part of the bias is removed before
-// it gets integrated into the attitude estimate.
-void calibrateGyroBias() {
-  constexpr int samples = 500;
-  double sx = 0, sy = 0, sz = 0;
-  int taken = 0;
-
-  for (int i = 0; i < samples; i++) {
-    float x, y, z;
-    if (readGyroDps(x, y, z)) {
-      sx += x;
-      sy += y;
-      sz += z;
-      taken++;
+// Accelerometer FIFO: a header byte per frame (0x84 = data, followed by 6 bytes).
+// Returns the count of data frames; glitch reports frames that could not be read
+// in order (the FIFO is then emptied and the clock re-synced).
+int readAccelFifo(int16_t (*frames)[3], int maxFrames, bool &glitch) {
+  glitch = false;
+  uint8_t lb[2];
+  if (!readBytes(ACC_ADDR, 0x24, lb, 2)) return 0;
+  int len = lb[0] | ((lb[1] & 0x3F) << 8);
+  int got = 0;
+  uint8_t buf[ACC_CHUNK * 7];
+  while (len >= 7 && got < maxFrames) {
+    int n = min(len / 7, min(ACC_CHUNK, maxFrames - got)) * 7;
+    if (!readBytes(ACC_ADDR, 0x26, buf, n)) break;
+    len -= n;
+    int i = 0;
+    while (i < n) {
+      uint8_t h = buf[i];
+      int size;
+      if (h == 0x84) size = 7;
+      else if (h == 0x40 || h == 0x48 || h == 0x50) size = 2;  // skip, config change, sample drop
+      else if (h == 0x44) size = 4;                              // sensor time
+      else if (h == 0x80) { size = n; }                          // read past the end
+      else { glitch = true; size = n; }
+      if (i + size > n && h != 0x80) { glitch = true; break; }  // frame split across reads
+      if (h == 0x84 && got < maxFrames) {
+        const uint8_t *b = buf + i + 1;
+        frames[got][0] = (int16_t)(b[0] | (b[1] << 8));
+        frames[got][1] = (int16_t)(b[2] | (b[3] << 8));
+        frames[got][2] = (int16_t)(b[4] | (b[5] << 8));
+        got++;
+      }
+      if (h == 0x40 || h == 0x50) glitch = true;  // samples were lost
+      i += size;
     }
-    delay(3);
+    if (glitch) break;
   }
-
-  if (taken > 0) {
-    gyroBiasDps[0] = sx / taken;
-    gyroBiasDps[1] = sy / taken;
-    gyroBiasDps[2] = sz / taken;
+  if (glitch) {  // empty it so the next read starts on a frame boundary
+    for (int k = 0; k < 12 && readBytes(ACC_ADDR, 0x24, lb, 2); k++) {
+      int left = lb[0] | ((lb[1] & 0x3F) << 8);
+      if (left == 0) break;
+      readBytes(ACC_ADDR, 0x26, buf, min(left, (int)sizeof(buf)));
+    }
   }
-  Serial.printf("gyro bias (dps): x=%.3f y=%.3f z=%.3f\n",
-                gyroBiasDps[0], gyroBiasDps[1], gyroBiasDps[2]);
+  return got;
 }
 
-// Mahony complementary filter. gx/gy/gz in rad/s, accel and mag in any unit
-// (both get normalized). Pass mx=my=mz=0 to run accel+gyro only.
-void mahonyUpdate(float gx, float gy, float gz,
-                  float ax, float ay, float az,
-                  float mx, float my, float mz,
-                  float dt, bool holdYaw) {
-  float recipNorm;
-  float halfex = 0.0f, halfey = 0.0f, halfez = 0.0f;
+// Gives each FIFO frame a time on the board's clock. Frames come at the sensor's
+// own rate (measured, since it can sit a percent off nominal), and the stamps are
+// pulled gently toward the moment they were read so the two sensors stay aligned.
+struct StreamClock {
+  double period = 1e6 / ODR_HZ;  // microseconds per frame
+  double tLast = 0;
+  bool synced = false;
+  int64_t winStart = 0;
+  uint32_t winFrames = 0;
+  uint32_t resyncs = 0;
+  float rateHz = 0;
 
-  float accNorm = sqrtf(ax * ax + ay * ay + az * az);
-  bool useAcc = fabsf(accNorm - 1.0f) < ACCEL_REJECT_TOL_G;
-  bool useMag = !(mx == 0.0f && my == 0.0f && mz == 0.0f);
+  void resync() { synced = false; }
 
-  float q0q0 = q0 * q0, q0q1 = q0 * q1, q0q2 = q0 * q2, q0q3 = q0 * q3;
-  float q1q1 = q1 * q1, q1q2 = q1 * q2, q1q3 = q1 * q3;
-  float q2q2 = q2 * q2, q2q3 = q2 * q3, q3q3 = q3 * q3;
-
-  if (useAcc) {
-    ax /= accNorm;
-    ay /= accNorm;
-    az /= accNorm;
-
-    // Estimated direction of gravity in the sensor frame.
-    float halfvx = q1q3 - q0q2;
-    float halfvy = q0q1 + q2q3;
-    float halfvz = q0q0 - 0.5f + q3q3;
-
-    // Error is the cross product between estimated and measured directions.
-    halfex += (ay * halfvz - az * halfvy);
-    halfey += (az * halfvx - ax * halfvz);
-    halfez += (ax * halfvy - ay * halfvx);
+  void stamp(int n, int64_t now, uint32_t *out) {
+    if (n <= 0) return;
+    if (!synced) {
+      tLast = (double)now - period * n;
+      synced = true;
+      winStart = now;
+      winFrames = 0;
+      resyncs++;
+    }
+    for (int i = 0; i < n; i++) {
+      tLast += period;
+      out[i] = (uint32_t)(uint64_t)tLast;
+    }
+    double err = (double)now - tLast;
+    if (fabs(err) > 20000.0) synced = false;  // a stall: start again from the clock
+    else tLast += 0.02 * err;
+    winFrames += n;
+    if (now - winStart >= 2000000) {
+      double measured = (double)(now - winStart) / winFrames;
+      double nominal = 1e6 / ODR_HZ;
+      if (fabs(measured - nominal) < 0.05 * nominal) period += 0.2 * (measured - period);
+      rateHz = winFrames * 1e6f / (float)(now - winStart);
+      winStart = now;
+      winFrames = 0;
+    }
   }
+};
 
-  if (useMag) {
-    recipNorm = 1.0f / sqrtf(mx * mx + my * my + mz * mz);
-    mx *= recipNorm;
-    my *= recipNorm;
-    mz *= recipNorm;
+// ---------------------------------------------------------------- shared state
 
-    // Earth's magnetic field projected into the sensor frame.
-    float hx = 2.0f * (mx * (0.5f - q2q2 - q3q3) + my * (q1q2 - q0q3) + mz * (q1q3 + q0q2));
-    float hy = 2.0f * (mx * (q1q2 + q0q3) + my * (0.5f - q1q1 - q3q3) + mz * (q2q3 - q0q1));
-    float bx = sqrtf(hx * hx + hy * hy);
-    float bz = 2.0f * (mx * (q1q3 - q0q2) + my * (q2q3 + q0q1) + mz * (0.5f - q1q1 - q2q2));
+trk::Tracker tracker;
+StreamClock accClock, gyrClock;
 
-    float halfwx = bx * (0.5f - q2q2 - q3q3) + bz * (q1q3 - q0q2);
-    float halfwy = bx * (q1q2 - q0q3) + bz * (q0q1 + q2q3);
-    float halfwz = bx * (q0q2 + q1q3) + bz * (0.5f - q1q1 - q2q2);
+float accOffset[3] = {0, 0, 0};  // calibration, g: calibrated = (raw - offset) * scale
+float accScale[3] = {1, 1, 1};
 
-    halfex += (my * halfwz - mz * halfwy);
-    halfey += (mz * halfwx - mx * halfwz);
-    halfez += (mx * halfwy - my * halfwx);
+// Requests from the command side, applied by the sensor task.
+volatile bool reqZeroPos = false, reqZeroYaw = false, reqCal = false, reqRaw = false;
+float reqCalValues[6];
+
+// What the output side reads, copied under a lock.
+struct Snapshot {
+  uint32_t ms;
+  Q q;        // display frame: heading 0 where the user zeroed it
+  V3 p, v;    // display frame, metres and m/s
+  uint8_t state;
+  uint32_t moves;
+  float accStd, gyroMeanDps, gLocal, lastMoveTime, lastMoveVres;
+  V3 bgDps;
+  float accG[3], gyroDps[3], mag[3];  // latest, sensor axes (accel in g, calibrated)
+  float accRawG[3];                   // latest, before calibration
+  float accHz, gyrHz;
+  uint32_t accGlitches, gyrOverruns, rawDrops;
+};
+Snapshot snap;
+portMUX_TYPE snapLock = portMUX_INITIALIZER_UNLOCKED;
+
+// Raw samples for offline replay: exactly what the tracker was fed.
+struct RawSample {
+  char kind;  // 'A' accel m/s^2, 'G' gyro rad/s (bias not removed), 'I' the INIT line
+  uint32_t t;
+  float x, y, z;
+};
+constexpr int RAW_RING = 1024;
+RawSample rawRing[RAW_RING];
+volatile uint32_t rawHead = 0, rawTail = 0;
+volatile uint32_t rawDrops = 0;
+
+void pushRaw(char kind, uint32_t t, V3 v) {
+  uint32_t next = (rawHead + 1) % RAW_RING;
+  if (next == rawTail) {
+    rawDrops++;
+    return;
   }
-
-  gx += TWO_KP * halfex;
-  gy += TWO_KP * halfey;
-  gz += TWO_KP * halfez;
-
-  // With the board at rest, any rotation about the earth's vertical is gyro
-  // bias or filter feedback, not real motion. Removing that component keeps
-  // heading fixed while still letting roll/pitch settle.
-  if (holdYaw) {
-    float vx = 2.0f * (q1 * q3 - q0 * q2);
-    float vy = 2.0f * (q0 * q1 + q2 * q3);
-    float vz = q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3;
-    float along = gx * vx + gy * vy + gz * vz;
-    gx -= along * vx;
-    gy -= along * vy;
-    gz -= along * vz;
-  }
-
-  // Integrate the rate of change of the quaternion.
-  gx *= 0.5f * dt;
-  gy *= 0.5f * dt;
-  gz *= 0.5f * dt;
-  float qa = q0, qb = q1, qc = q2;
-  q0 += (-qb * gx - qc * gy - q3 * gz);
-  q1 += (qa * gx + qc * gz - q3 * gy);
-  q2 += (qa * gy - qb * gz + q3 * gx);
-  q3 += (qa * gz + qb * gy - qc * gx);
-
-  recipNorm = 1.0f / sqrtf(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
-  q0 *= recipNorm;
-  q1 *= recipNorm;
-  q2 *= recipNorm;
-  q3 *= recipNorm;
+  rawRing[rawHead] = {kind, t, v.x, v.y, v.z};
+  rawHead = next;
 }
 
-// Records how far the magnetometer wanders while the board is held still, so
-// the rotation sweep can be judged against this board's real noise instead of a
-// guessed threshold.
-void measureMagNoiseFloor() {
-  float lo[3] = {INFINITY, INFINITY, INFINITY};
-  float hi[3] = {-INFINITY, -INFINITY, -INFINITY};
+// ---------------------------------------------------------------- sensor task
 
-  for (int i = 0; i < 200; i++) {
-    float raw[3];
-    if (readMagRawCounts(raw)) {
-      for (int k = 0; k < 3; k++) {
-        if (raw[k] < lo[k]) lo[k] = raw[k];
-        if (raw[k] > hi[k]) hi[k] = raw[k];
+float yaw0 = 0;           // heading that counts as 0
+V3 origin{0, 0, 0};       // position that counts as 0
+char initLine[256];       // tracker state at the start of a raw recording
+
+void sensorTask(void *) {
+  static int16_t gFrames[100][3], aFrames[150][3];
+  static uint32_t gT[100], aT[150];
+  uint32_t accGlitches = 0, gyrOverruns = 0;
+  float mag[3] = {0, 0, 0};
+  int64_t lastMagUs = 0;
+  float accRawG[3] = {0, 0, 1}, accG[3] = {0, 0, 1}, gyroDps[3] = {0, 0, 0};
+  bool rawOn = false;
+
+  flushGyroFifo();
+  bool dummy;
+  readAccelFifo(aFrames, 150, dummy);  // throw away what piled up during setup
+
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(2));  // about one new frame per sensor each time
+
+    if (reqCal) {
+      for (int i = 0; i < 3; i++) {
+        accOffset[i] = reqCalValues[i];
+        accScale[i] = reqCalValues[3 + i];
+      }
+      reqCal = false;
+    }
+    if (reqZeroPos) {
+      origin = tracker.p;
+      reqZeroPos = false;
+    }
+    if (reqZeroYaw) {
+      yaw0 = trk::yawOf(tracker.q);
+      reqZeroYaw = false;
+    }
+    if (reqRaw != rawOn) {
+      rawOn = reqRaw;
+      if (rawOn) {
+        const trk::Tracker &T = tracker;
+        snprintf(initLine, sizeof(initLine),
+                 "INIT,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f,%.5f,%.5f,%.5f,%.5f,%d,%.5f,%.5f,%.5f,%.6f,%.5f,%.5f,%.5f\n",
+                 T.q.w, T.q.x, T.q.y, T.q.z, T.bg.x, T.bg.y, T.bg.z, T.p.x, T.p.y, T.p.z, T.gLocal, (int)T.state,
+                 T.fRef.x, T.fRef.y, T.fRef.z, yaw0, origin.x, origin.y, origin.z);
+        pushRaw('I', 0, V3{0, 0, 0});  // the samples that follow start from this state
       }
     }
-    delay(5);
-  }
 
-  for (int k = 0; k < 3; k++) {
-    magNoiseFloor[k] = isfinite(hi[k] - lo[k]) ? (hi[k] - lo[k]) : 0.0f;
-  }
-  Serial.printf("mag noise floor (counts): x=%.0f y=%.0f z=%.0f\n",
-                magNoiseFloor[0], magNoiseFloor[1], magNoiseFloor[2]);
-}
+    int64_t now = esp_timer_get_time();
+    bool overrun, glitch;
+    int ng = readGyroFifo(gFrames, 100, overrun);
+    int na = readAccelFifo(aFrames, 150, glitch);
+    if (overrun) {
+      flushGyroFifo();
+      gyrClock.resync();
+      gyrOverruns++;
+    }
+    if (glitch) {
+      accClock.resync();
+      accGlitches++;
+    }
+    gyrClock.stamp(ng, now, gT);
+    accClock.stamp(na, now, aT);
 
-// The angle between gravity and the earth's magnetic field is fixed, so with
-// the axes mapped correctly accel·mag stays constant no matter how the board is
-// turned. Whichever of the 24 possible axis orientations holds that dot product
-// steadiest across the captured rotations is the real one.
-void solveMagAxisMapping() {
-  static const int perms[6][3] = {{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
-  static const int parity[6] = {1, -1, -1, 1, 1, -1};
-
-  int bestPerm[3] = {0, 1, 2};
-  float bestSign[3] = {1.0f, 1.0f, 1.0f};
-  float bestScore = INFINITY;
-  float identityScore = INFINITY;
-  float runnerUpScore = INFINITY;
-
-  for (int p = 0; p < 6; p++) {
-    for (int s = 0; s < 8; s++) {
-      float sign[3] = {(s & 1) ? -1.0f : 1.0f, (s & 2) ? -1.0f : 1.0f, (s & 4) ? -1.0f : 1.0f};
-      if (parity[p] * sign[0] * sign[1] * sign[2] < 0.0f) continue; // keep proper rotations only
-
-      double sum = 0.0, sumSq = 0.0;
-      int n = 0;
-      for (int i = 0; i < calSampleCount; i++) {
-        const float *a = calSamples[i].a;
-        const float *m = calSamples[i].m;
-
-        float aNorm = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
-        if (aNorm < 0.8f || aNorm > 1.2f) continue; // reject samples with motion accel
-
-        float mapped[3];
-        for (int k = 0; k < 3; k++) mapped[k] = sign[k] * m[perms[p][k]];
-        float mNorm = sqrtf(mapped[0] * mapped[0] + mapped[1] * mapped[1] + mapped[2] * mapped[2]);
-        if (mNorm < 1e-6f) continue;
-
-        float dot = (a[0] * mapped[0] + a[1] * mapped[1] + a[2] * mapped[2]) / (aNorm * mNorm);
-        sum += dot;
-        sumSq += (double)dot * dot;
-        n++;
-      }
-      if (n < 50) continue;
-
-      float mean = sum / n;
-      float score = sqrtf((float)(sumSq / n - (double)mean * mean));
-
-      bool isIdentity = (perms[p][0] == 0 && perms[p][1] == 1 && perms[p][2] == 2 &&
-                         sign[0] > 0 && sign[1] > 0 && sign[2] > 0);
-      if (isIdentity) identityScore = score;
-
-      if (score < bestScore) {
-        runnerUpScore = bestScore;
-        bestScore = score;
+    // Feed both streams to the tracker in time order.
+    int ig = 0, ia = 0;
+    while (ig < ng || ia < na) {
+      bool takeGyro = ia >= na || (ig < ng && (int32_t)(gT[ig] - aT[ia]) <= 0);
+      if (takeGyro) {
+        for (int k = 0; k < 3; k++) gyroDps[k] = gFrames[ig][k] / GYR_LSB_PER_DPS;
+        V3 w{gyroDps[0] * DEG, gyroDps[1] * DEG, gyroDps[2] * DEG};
+        tracker.gyro(gT[ig], w);
+        if (rawOn) pushRaw('G', gT[ig], w);
+        ig++;
+      } else {
         for (int k = 0; k < 3; k++) {
-          bestPerm[k] = perms[p][k];
-          bestSign[k] = sign[k];
+          accRawG[k] = aFrames[ia][k] / ACC_LSB_PER_G;
+          accG[k] = (accRawG[k] - accOffset[k]) * accScale[k];
         }
-      } else if (score < runnerUpScore) {
-        runnerUpScore = score;
+        V3 f{accG[0] * G0, accG[1] * G0, accG[2] * G0};
+        tracker.accel(aT[ia], f);
+        if (rawOn) pushRaw('A', aT[ia], f);
+        ia++;
       }
     }
-  }
 
-  if (!isfinite(bestScore)) {
-    Serial.println("  axis mapping: not enough usable samples, keeping identity");
-    return;
-  }
+    if (now - lastMagUs >= 20000) {
+      lastMagUs = now;
+      readMagRaw(mag);
+    }
 
-  // A real mapping should stand clearly apart from the next best candidate.
-  if (runnerUpScore < bestScore * 1.5f) {
-    Serial.printf("  axis mapping: ambiguous (best %.4f vs next %.4f), keeping identity\n",
-                  bestScore, runnerUpScore);
-    return;
+    // Publish in the display frame.
+    Q rz = trk::yawQuat(-yaw0);
+    Snapshot s;
+    s.ms = (uint32_t)(now / 1000);
+    s.q = trk::qmul(rz, tracker.q);
+    s.p = trk::rotate(rz, tracker.p - origin);
+    s.v = trk::rotate(rz, tracker.v);
+    s.state = tracker.lost ? 3 : tracker.state;  // 3: moving too long, position paused
+    s.moves = tracker.moves;
+    s.accStd = tracker.accStd;
+    s.gyroMeanDps = tracker.gyroMean / DEG;
+    s.gLocal = tracker.gLocal;
+    s.lastMoveTime = tracker.lastMoveTime;
+    s.lastMoveVres = trk::norm(tracker.lastMoveVres);
+    s.bgDps = tracker.bg * (1.0f / DEG);
+    for (int k = 0; k < 3; k++) {
+      s.accG[k] = accG[k];
+      s.accRawG[k] = accRawG[k];
+      s.gyroDps[k] = gyroDps[k];
+      s.mag[k] = mag[k];
+    }
+    s.accHz = accClock.rateHz;
+    s.gyrHz = gyrClock.rateHz;
+    s.accGlitches = accGlitches;
+    s.gyrOverruns = gyrOverruns;
+    s.rawDrops = rawDrops;
+    portENTER_CRITICAL(&snapLock);
+    snap = s;
+    portEXIT_CRITICAL(&snapLock);
   }
-
-  for (int k = 0; k < 3; k++) {
-    magAxisMap[k] = bestPerm[k];
-    magAxisSign[k] = bestSign[k];
-  }
-  Serial.printf("  axis mapping: x=%c%c y=%c%c z=%c%c  (spread %.4f, next best %.4f, identity %.4f)\n",
-                bestSign[0] < 0 ? '-' : '+', 'x' + bestPerm[0],
-                bestSign[1] < 0 ? '-' : '+', 'x' + bestPerm[1],
-                bestSign[2] < 0 ? '-' : '+', 'x' + bestPerm[2],
-                bestScore, runnerUpScore, identityScore);
 }
 
-// Collects magnetometer extremes while the board is rotated, then derives
-// hard-iron offsets (centre of the swept sphere) and soft-iron scales
-// (equalising each axis's swing).
-void calibrateMagnetometer() {
-  Serial.println();
-  Serial.println("Mag calibration: rotate the board slowly through ALL orientations");
-  Serial.println("(figure-8s, plus turning it over) for the next 30 seconds.");
-  Serial.println("Starting in 3 seconds...");
-  delay(3000);
+// ---------------------------------------------------------------- WiFi and output
 
-  float lo[3] = {INFINITY, INFINITY, INFINITY};
-  float hi[3] = {-INFINITY, -INFINITY, -INFINITY};
-  calSampleCount = 0;
+constexpr uint16_t TCP_PORT = 8888;
+WiFiServer tcpServer(TCP_PORT);
+WiFiClient tcpClient;
+bool netStarted = false;
+volatile uint8_t lastDisconnectReason = 0;  // why the last connection attempt failed (ESP-IDF reason code)
+bool newClient = false;
+Preferences prefs;
 
-  uint32_t startMs = millis();
-  uint32_t lastSampleMs = 0;
-  uint32_t lastReportMs = 0;
+void startNetworkServices() {
+  WiFi.setSleep(false);  // power save makes the board drop packets and answer slowly
+  MDNS.begin("imu");
+  ArduinoOTA.setHostname("imu");
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.begin();
+  tcpServer.begin();
+  tcpServer.setNoDelay(true);
+  netStarted = true;
+  Serial.printf("WiFi: connected, IP %s, TCP port %u\n", WiFi.localIP().toString().c_str(), TCP_PORT);
+}
 
-  while (millis() - startMs < MAG_CAL_DURATION_MS) {
-    ArduinoOTA.handle();
-    if (millis() - lastSampleMs < MAG_CAL_SAMPLE_INTERVAL_MS) continue;
-    lastSampleMs = millis();
+void connectWiFi() {
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+#ifdef WIFI_STATIC_IP
+  WiFi.config(IPAddress(WIFI_STATIC_IP), IPAddress(WIFI_GATEWAY), IPAddress(255, 255, 255, 0), IPAddress(WIFI_GATEWAY));
+#endif
+  // The library refuses networks weaker than WPA2 whenever a password is given, which
+  // rejects an open hotspot. Allow any; on an open network the password is just ignored.
+  WiFi.setMinSecurity(WIFI_AUTH_OPEN);
+  WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t info) { lastDisconnectReason = info.wifi_sta_disconnected.reason; },
+               ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  // Not waited for: the loop starts serving as soon as the connection comes up, and USB
+  // works meanwhile. (Waiting here kept USB silent for 15 s after every restart whenever
+  // the network could not be reached.)
+  Serial.printf("WiFi: connecting to \"%s\" in the background (2.4 GHz networks only)\n", WIFI_SSID);
+}
 
-    float raw[3], ax, ay, az;
-    if (!readMagRawCounts(raw) || !readAccelG(ax, ay, az)) continue;
+uint32_t tcpDropped = 0;  // bytes that did not fit in the send buffer
 
-    for (int i = 0; i < 3; i++) {
-      if (raw[i] < lo[i]) lo[i] = raw[i];
-      if (raw[i] > hi[i]) hi[i] = raw[i];
-    }
+// Output to the WiFi viewer goes through this buffer, so a slow patch on the link
+// (the hotspot's ping swings up to 350 ms) is ridden out instead of losing data.
+// Only whole lines go in; the loop pushes out whatever the link takes, never waiting
+// (a blocking write to a viewer that had just been closed once froze this loop).
+constexpr size_t TX_SIZE = 24576;
+static char txBuf[TX_SIZE];
+static size_t txHead = 0, txTail = 0;  // bytes live in [txTail, txHead), wrapping
 
-    if (calSampleCount < MAG_CAL_MAX_SAMPLES) {
-      calSamples[calSampleCount].a[0] = ax;
-      calSamples[calSampleCount].a[1] = ay;
-      calSamples[calSampleCount].a[2] = az;
-      calSamples[calSampleCount].m[0] = raw[0];
-      calSamples[calSampleCount].m[1] = raw[1];
-      calSamples[calSampleCount].m[2] = raw[2];
-      calSampleCount++;
-    }
+size_t txUsed() { return (txHead + TX_SIZE - txTail) % TX_SIZE; }
 
-    if (millis() - lastReportMs >= 2000) {
-      lastReportMs = millis();
-      Serial.printf("  %2lus left | swing x=%.0f y=%.0f z=%.0f\n",
-                    (unsigned long)((MAG_CAL_DURATION_MS - (millis() - startMs)) / 1000),
-                    hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
-    }
-  }
-
-  float half[3];
-  for (int i = 0; i < 3; i++) half[i] = 0.5f * (hi[i] - lo[i]);
-
-  // Did the board actually get turned through a range of orientations? Gravity
-  // sweeping across all three accel axes is the scale-free way to tell.
-  float aLo[3] = {INFINITY, INFINITY, INFINITY};
-  float aHi[3] = {-INFINITY, -INFINITY, -INFINITY};
-  for (int i = 0; i < calSampleCount; i++) {
-    for (int k = 0; k < 3; k++) {
-      if (calSamples[i].a[k] < aLo[k]) aLo[k] = calSamples[i].a[k];
-      if (calSamples[i].a[k] > aHi[k]) aHi[k] = calSamples[i].a[k];
-    }
-  }
-  float minAccelSpread = INFINITY;
-  for (int k = 0; k < 3; k++) minAccelSpread = fminf(minAccelSpread, aHi[k] - aLo[k]);
-
-  if (!isfinite(minAccelSpread) || minAccelSpread < 0.8f) {
-    Serial.printf("  FAILED: board did not cover enough orientations (min accel swing %.2fg).\n",
-                  minAccelSpread);
-    Serial.println("  Mag stays out of the fusion. Reset and rotate it through all");
-    Serial.println("  orientations, including turning it upside down.");
+void txFlush() {
+  if (!tcpClient) {
+    txHead = txTail = 0;
     return;
   }
-
-  // Each axis has to swing well clear of its own noise, otherwise we are just
-  // fitting a sphere to sensor jitter.
-  for (int k = 0; k < 3; k++) {
-    if ((hi[k] - lo[k]) < 8.0f * magNoiseFloor[k] || (hi[k] - lo[k]) < 500.0f) {
-      Serial.printf("  FAILED: axis %c swing %.0f counts is not clear of noise (%.0f).\n",
-                    'x' + k, hi[k] - lo[k], magNoiseFloor[k]);
-      Serial.println("  Mag stays out of the fusion. Reset and rotate more thoroughly.");
+  int fd = tcpClient.fd();
+  if (fd < 0) return;
+  while (txUsed() > 0) {
+    size_t chunk = txHead >= txTail ? txHead - txTail : TX_SIZE - txTail;
+    int sent = send(fd, txBuf + txTail, chunk, MSG_DONTWAIT);
+    if (sent < 0) {
+      if (errno != EAGAIN && errno != EWOULDBLOCK) {  // the viewer went away
+        tcpClient.stop();
+        txHead = txTail = 0;
+      }
       return;
     }
+    txTail = (txTail + sent) % TX_SIZE;
+    if ((size_t)sent < chunk) return;
   }
-
-  float smallest = fminf(half[0], fminf(half[1], half[2]));
-  float largest = fmaxf(half[0], fmaxf(half[1], half[2]));
-  if (largest > smallest * 4.0f) {
-    Serial.println("  WARNING: very uneven coverage, yaw may be poor. Consider redoing this.");
-  }
-
-  float avgHalf = (half[0] + half[1] + half[2]) / 3.0f;
-  for (int i = 0; i < 3; i++) {
-    magOffset[i] = 0.5f * (hi[i] + lo[i]);
-    magScale[i] = avgHalf / half[i];
-  }
-
-  // Re-express the stored samples in corrected counts so the axis search sees
-  // the same values the fusion will.
-  for (int i = 0; i < calSampleCount; i++) {
-    for (int k = 0; k < 3; k++) {
-      calSamples[i].m[k] = (calSamples[i].m[k] - magOffset[k]) * magScale[k];
-    }
-  }
-
-  solveMagAxisMapping();
-
-  Serial.printf("  offsets: %.1f %.1f %.1f\n", magOffset[0], magOffset[1], magOffset[2]);
-  Serial.printf("  scales : %.4f %.4f %.4f\n", magScale[0], magScale[1], magScale[2]);
-  Serial.println("  To skip this next boot, paste these into magOffset/magScale");
-  Serial.println("  (and magAxisMap/magAxisSign) and set useMagInFusion = true.");
-
-  useMagInFusion = true;
-  Serial.println("  Mag calibration done, yaw is now absolute.");
 }
 
-// Starting from the identity quaternion makes the filter converge through a
-// large initial error. Seeding from the first accel sample starts it at the
-// correct tilt instead.
-void seedOrientationFromAccel() {
-  float ax, ay, az;
-  if (!readAccelG(ax, ay, az)) return;
-
-  float roll = atan2f(ay, az);
-  float pitch = atan2f(-ax, sqrtf(ay * ay + az * az));
-  float cr = cosf(roll * 0.5f), sr = sinf(roll * 0.5f);
-  float cp = cosf(pitch * 0.5f), sp = sinf(pitch * 0.5f);
-
-  q0 = cr * cp;
-  q1 = sr * cp;
-  q2 = cr * sp;
-  q3 = -sr * sp;
+// Writes to USB serial (dropped rather than waited for if its buffer is full) and
+// queues the same for the WiFi viewer.
+void emit(const char *buf, size_t n, bool toSerial = true) {
+  if (toSerial && Serial.availableForWrite() >= (int)n) Serial.write((const uint8_t *)buf, n);
+  if (!tcpClient) return;
+  if (txUsed() + n >= TX_SIZE - 1) {
+    tcpDropped += n;
+    return;
+  }
+  for (size_t i = 0; i < n; i++) {
+    txBuf[txHead] = buf[i];
+    txHead = (txHead + 1) % TX_SIZE;
+  }
 }
 
-// One command line from the PC. Only "c,ox,oy,oz,sx,sy,sz" is understood.
-void handleCommand(const char *line) {
+void emitf(const char *fmt, ...) {
+  char buf[256];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  if (n > 0) emit(buf, min(n, (int)sizeof(buf) - 1));
+}
+
+void loadCalibration() {
+  prefs.begin("imu", true);
   float v[6];
-  if (line[0] != 'c' || line[1] != ',') return;
-  if (sscanf(line + 2, "%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return;
-  for (int i = 0; i < 3; i++) {
-    if (!(fabsf(v[i]) < 0.5f) || !(v[3 + i] > 0.5f && v[3 + i] < 2.0f)) return; // not a plausible calibration
+  if (prefs.getBytes("acal", v, sizeof(v)) == sizeof(v)) {
+    for (int i = 0; i < 3; i++) {
+      accOffset[i] = v[i];
+      accScale[i] = v[3 + i];
+    }
+    Serial.printf("accelerometer calibration loaded: %.4f %.4f %.4f / %.4f %.4f %.4f\n", v[0], v[1], v[2], v[3], v[4], v[5]);
+  } else {
+    Serial.println("accelerometer: no stored calibration, using raw readings");
   }
-  for (int i = 0; i < 3; i++) {
-    accOffset[i] = v[i];
-    accScale[i] = v[3 + i];
-  }
-  Serial.printf("ACAL,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\n", v[0], v[1], v[2], v[3], v[4], v[5]);
+  prefs.end();
 }
 
-void quaternionToEuler(float &rollDeg, float &pitchDeg, float &yawDeg) {
-  float sinp = 2.0f * (q0 * q2 - q3 * q1);
-  if (sinp > 1.0f) sinp = 1.0f;
-  if (sinp < -1.0f) sinp = -1.0f;
-
-  rollDeg = atan2f(2.0f * (q0 * q1 + q2 * q3), 1.0f - 2.0f * (q1 * q1 + q2 * q2)) * RAD_TO_DEG;
-  pitchDeg = asinf(sinp) * RAD_TO_DEG;
-  yawDeg = atan2f(2.0f * (q0 * q3 + q1 * q2), 1.0f - 2.0f * (q2 * q2 + q3 * q3)) * RAD_TO_DEG;
+void handleLine(const char *line) {
+  float v[6];
+  if ((line[0] != 'c' && line[0] != 'C') || line[1] != ',') return;
+  if (sscanf(line + 2, "%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return;
+  for (int i = 0; i < 3; i++)
+    if (!(fabsf(v[i]) < 0.5f) || !(v[3 + i] > 0.5f && v[3 + i] < 2.0f)) return;  // not a plausible calibration
+  for (int i = 0; i < 6; i++) reqCalValues[i] = v[i];
+  reqCal = true;
+  if (line[0] == 'C') {
+    prefs.begin("imu", false);
+    prefs.putBytes("acal", v, sizeof(v));
+    prefs.end();
+  }
+  emitf("ACAL,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f%s\n", v[0], v[1], v[2], v[3], v[4], v[5], line[0] == 'C' ? ",saved" : "");
 }
 
 void setup() {
+  Serial.setTxBufferSize(4096);
   Serial.begin(115200);
-  while (!Serial && millis() < 15000) {} // wait for the serial monitor to attach
-  delay(300);
+  delay(200);
+  Serial.println();
+  Serial.println("=== IMU 3D tracking (ESP32) ===");
 
-  Wire.begin(); // default I2C pins: SDA = GPIO21, SCL = GPIO22
+  Wire.begin();  // SDA = GPIO21, SCL = GPIO22
   Wire.setClock(400000);
+  setupAccel();
+  setupGyro();
+  setupMag();
+  loadCalibration();
+
+  xTaskCreatePinnedToCore(sensorTask, "sensors", 8192, nullptr, 5, nullptr, 1);
+  Serial.println("Hold the board still for a second: tracking starts once it has settled.");
   connectWiFi();
-
-  setupBMI088Accel();
-  setupBMI088Gyro();
-  setupBMM350();
-
-  out.println();
-  out.println("=== IMU startup ===");
-  out.println("Keep the board STILL for gyro bias calibration...");
-  delay(1500);
-  calibrateGyroBias();
-  measureMagNoiseFloor();
-
-  out.println();
-  out.println("Send any character within 5s to SKIP mag calibration.");
-  bool skip = false;
-  uint32_t waitStart = millis();
-  while (millis() - waitStart < 5000) {
-    ArduinoOTA.handle();
-    if (out.available()) {
-      while (out.available()) out.read();
-      skip = true;
-      break;
-    }
-  }
-
-  if (skip) {
-    out.println("Skipped. Mag stays out of the fusion, yaw is relative and will drift.");
-  } else {
-    calibrateMagnetometer();
-  }
-
-  seedOrientationFromAccel();
-  flushGyroFifo(); // it filled up and overran while calibration was running
-  out.println();
-  out.println("=== running ===");
 }
 
 void loop() {
-  ArduinoOTA.handle();
-  static uint32_t lastPrintMs = millis();
-  static uint32_t lastAccelUs = 0;
-  static float ax = 0, ay = 0, az = 0;
-  static float gx = 0, gy = 0, gz = 0;
-  static float mx = 0, my = 0, mz = 0;
-  static bool accelValid = false, magValid = false;
+  if (!netStarted && WiFi.status() == WL_CONNECTED) startNetworkServices();
 
-  // The sensor's real ODR can sit a percent or so off nominal, which would
-  // scale every integrated angle; measure it against the Teensy's crystal.
-  static float dtSample = 1.0f / GYRO_ODR_HZ;
-  static uint32_t odrWindowStartUs = micros();
-  static uint32_t odrWindowFrames = 0;
+  // The library retries a dropped connection but gives up if the network was not there
+  // when the board started (a hotspot switched on later). So ask again every 15 s until
+  // it is connected; a board on a battery then joins whenever the network appears.
+  static uint32_t lastJoinTry = 0;
+  if (WiFi.status() != WL_CONNECTED && millis() - lastJoinTry > 15000) {
+    lastJoinTry = millis();
+    // Say what the board sees, so a network that is on the wrong band or hidden shows up.
+    int n = WiFi.scanNetworks();
+    int seen = 0;
+    for (int i = 0; i < n; i++) {
+      if (WiFi.SSID(i) == WIFI_SSID) {
+        seen++;
+        Serial.printf("WiFi: sees \"%s\" channel %d, %d dBm, security %d\n", WIFI_SSID, WiFi.channel(i), WiFi.RSSI(i),
+                      (int)WiFi.encryptionType(i));
+      }
+    }
+    Serial.printf("WiFi: not connected (%d networks in range, \"%s\" %s), last disconnect reason %d; trying again\n", n,
+                  WIFI_SSID, seen ? "visible" : "NOT visible", lastDisconnectReason);
+    WiFi.scanDelete();
+    WiFi.disconnect();
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  }
+  if (netStarted) ArduinoOTA.handle();
 
-  static float gxLp = 0, gyLp = 0, gzLp = 0;
-  static float stillTime = 0;
-  static bool atRest = false;
+  if (netStarted) {
+    WiFiClient c = tcpServer.available();
+    if (c) {  // a new viewer always takes over, even if the old one vanished silently
+      if (tcpClient) tcpClient.stop();
+      txHead = txTail = 0;
+      newClient = true;
+      c.setNoDelay(true);
+      tcpClient = c;
+    }
+  }
 
-  // From the PC: 'v' keeps the fast stream on, 'h' turns it off, and a line
-  // starting with "c," sets the accelerometer calibration.
-  static uint32_t vizUntilMs = 0, lastVizMs = 0, logUntilMs = 0, lastLogMs = 0;
+  // Commands, from either side.
+  static uint32_t trkUntil = 0, rawUntil = 0, vizUntil = 0, logUntil = 0;
   static char cmd[96];
   static uint8_t cmdLen = 0;
-  while (out.available()) {
-    char c = out.read();
-    if (cmdLen == 0 && c == 'v') vizUntilMs = millis() + VIZ_TIMEOUT_MS;
-    else if (cmdLen == 0 && c == 'h') vizUntilMs = logUntilMs = 0;
-    else if (cmdLen == 0 && c == 'l') logUntilMs = millis() + VIZ_TIMEOUT_MS;
+  if (newClient) {  // a half-typed line from an earlier viewer must not swallow this one's commands
+    cmdLen = 0;
+    newClient = false;
+  }
+  for (;;) {
+    int c = -1;
+    if (Serial.available()) c = Serial.read();
+    else if (tcpClient && tcpClient.available()) c = tcpClient.read();
+    if (c < 0) break;
+    uint32_t until = millis() + 3000;
+    if (cmdLen == 0 && c == 't') trkUntil = until;
+    else if (cmdLen == 0 && c == 'r') rawUntil = trkUntil = until;
+    else if (cmdLen == 0 && c == 'v') vizUntil = until;
+    else if (cmdLen == 0 && c == 'l') logUntil = until;
+    else if (cmdLen == 0 && c == 'h') trkUntil = rawUntil = vizUntil = logUntil = 0;
+    else if (cmdLen == 0 && c == 's') continue;
+    else if (cmdLen == 0 && c == 'z') reqZeroPos = true;
+    else if (cmdLen == 0 && c == 'y') reqZeroYaw = true;
     else if (c == '\n' || c == '\r') {
       if (cmdLen > 0) {
         cmd[cmdLen] = 0;
-        handleCommand(cmd);
+        handleLine(cmd);
       }
       cmdLen = 0;
     } else if (cmdLen < sizeof(cmd) - 1) {
-      cmd[cmdLen++] = c;
+      cmd[cmdLen++] = (char)c;
     }
   }
 
-  uint32_t nowUs = micros();
-  if (nowUs - lastAccelUs >= ACCEL_READ_INTERVAL_US) {
-    lastAccelUs = nowUs;
-    accelValid = readAccelG(ax, ay, az);
-    bool magOk = readMag(mx, my, mz); // also read when not fused, so the log mode can report it
-    magValid = useMagInFusion && magOk;
+  uint32_t nowMs = millis();
+  auto active = [nowMs](uint32_t until) { return until != 0 && (int32_t)(until - nowMs) > 0; };
+  bool trkOn = active(trkUntil), rawOn = active(rawUntil), vizOn = active(vizUntil), logOn = active(logUntil);
+  reqRaw = rawOn && tcpClient;
+
+  Snapshot s;
+  portENTER_CRITICAL(&snapLock);
+  s = snap;
+  portEXIT_CRITICAL(&snapLock);
+
+  // Raw samples first, batched into large writes.
+  if (rawTail != rawHead) {
+    static char big[1400];
+    size_t used = 0;
+    while (rawTail != rawHead) {
+      const RawSample &r = rawRing[rawTail];
+      if (r.kind == 'I') {
+        if (used) emit(big, used, false);
+        used = 0;
+        emit(initLine, strlen(initLine), false);
+        rawTail = (rawTail + 1) % RAW_RING;
+        continue;
+      }
+      int n = r.kind == 'A' ? snprintf(big + used, sizeof(big) - used, "A,%lu,%.4f,%.4f,%.4f\n", (unsigned long)r.t, r.x, r.y, r.z)
+                            : snprintf(big + used, sizeof(big) - used, "G,%lu,%.6f,%.6f,%.6f\n", (unsigned long)r.t, r.x, r.y, r.z);
+      if (n <= 0 || used + n >= sizeof(big)) {
+        emit(big, used, false);
+        used = 0;
+        continue;  // retry this sample in an empty buffer
+      }
+      used += n;
+      rawTail = (rawTail + 1) % RAW_RING;
+    }
+    if (used) emit(big, used, false);
+    txFlush();
   }
 
-  static uint32_t lastFifoUs = 0;
-  if (nowUs - lastFifoUs < 2000) return; // ~1 new frame per 2.5 ms, no need to hammer I2C
-  lastFifoUs = nowUs;
+  static uint32_t lastTrk = 0, lastStat = 0, lastViz = 0, lastLog = 0, lastText = 0;
+  float roll = atan2f(2 * (s.q.w * s.q.x + s.q.y * s.q.z), 1 - 2 * (s.q.x * s.q.x + s.q.y * s.q.y)) / DEG;
+  float sp = 2 * (s.q.w * s.q.y - s.q.z * s.q.x);
+  float pitch = asinf(sp > 1 ? 1 : (sp < -1 ? -1 : sp)) / DEG;
+  float heading = trk::yawOf(s.q) / DEG;
+  if (heading < 0) heading += 360;
 
-  int16_t frames[100][3];
-  bool overrun;
-  int n = readGyroFifo(frames, 100, overrun);
-  if (overrun) {
-    // Samples were dropped, so this batch doesn't cover the elapsed time.
-    flushGyroFifo();
-    odrWindowStartUs = micros();
-    odrWindowFrames = 0;
-  } else if (n > 0) {
-    odrWindowFrames += n;
-    uint32_t windowUs = micros() - odrWindowStartUs;
-    if (windowUs >= 2000000 && odrWindowFrames > 0) {
-      float measured = windowUs * 1e-6f / odrWindowFrames;
-      float nominal = 1.0f / GYRO_ODR_HZ;
-      if (fabsf(measured - nominal) < 0.05f * nominal) dtSample += 0.2f * (measured - dtSample);
-      odrWindowStartUs = micros();
-      odrWindowFrames = 0;
-    }
+  if (trkOn && nowMs - lastTrk >= 20) {
+    lastTrk = nowMs - lastTrk < 60 ? lastTrk + 20 : nowMs;  // steady 50 Hz
+    emitf("TRK,%lu,%.5f,%.5f,%.5f,%.5f,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%u,%lu\n", (unsigned long)s.ms, s.q.w, s.q.x,
+          s.q.y, s.q.z, s.p.x, s.p.y, s.p.z, s.v.x, s.v.y, s.v.z, s.state, (unsigned long)s.moves);
   }
-  for (int i = 0; i < n; i++) {
-    gx = frames[i][0] / GYR_LSB_PER_DPS - gyroBiasDps[0];
-    gy = frames[i][1] / GYR_LSB_PER_DPS - gyroBiasDps[1];
-    gz = frames[i][2] / GYR_LSB_PER_DPS - gyroBiasDps[2];
-
-    float lpAlpha = dtSample / STILL_FILTER_TAU_S;
-    gxLp += lpAlpha * (gx - gxLp);
-    gyLp += lpAlpha * (gy - gyLp);
-    gzLp += lpAlpha * (gz - gzLp);
-
-    float rate = sqrtf(gxLp * gxLp + gyLp * gyLp + gzLp * gzLp);
-    float accNorm = sqrtf(ax * ax + ay * ay + az * az);
-    bool still = accelValid && rate < STILL_GYRO_DPS && fabsf(accNorm - 1.0f) < STILL_ACCEL_TOL_G;
-    stillTime = still ? stillTime + dtSample : 0.0f;
-    atRest = stillTime >= STILL_TIME_REQUIRED_S;
-
-    if (atRest) {
-      float adapt = dtSample / BIAS_ADAPT_TAU_S;
-      gyroBiasDps[0] += adapt * gx;
-      gyroBiasDps[1] += adapt * gy;
-      gyroBiasDps[2] += adapt * gz;
-    }
-
-    mahonyUpdate(gx * DEG_TO_RAD, gy * DEG_TO_RAD, gz * DEG_TO_RAD,
-                 accelValid ? ax : 0.0f, accelValid ? ay : 0.0f, accelValid ? az : 0.0f,
-                 magValid ? mx : 0.0f, magValid ? my : 0.0f, magValid ? mz : 0.0f,
-                 dtSample, atRest);
+  if (trkOn && nowMs - lastStat >= 1000) {
+    lastStat = nowMs;
+    emitf("STAT,%.1f,%.1f,%lu,%lu,%lu,%.4f,%.3f,%.4f,%.4f,%.4f,%.4f,%.2f,%.3f\n", s.accHz, s.gyrHz,
+          (unsigned long)s.accGlitches, (unsigned long)s.gyrOverruns, (unsigned long)(s.rawDrops + tcpDropped / 30), s.accStd,
+          s.gyroMeanDps, s.bgDps.x, s.bgDps.y, s.bgDps.z, s.gLocal, s.lastMoveTime, s.lastMoveVres);
   }
-
-  bool viz = vizUntilMs != 0 && (int32_t)(vizUntilMs - millis()) > 0;
-  if (viz) {
-    if (millis() - lastVizMs >= VIZ_INTERVAL_MS) {
-      lastVizMs = millis();
-      // Orientation, the accelerometer exactly as the chip reports it (g, sensor
-      // frame, before calibration), and the rotation rate (deg/s).
-      out.printf("VIZ,%lu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f\n",
-                    (unsigned long)millis(), q0, q1, q2, q3, accRaw[0], accRaw[1], accRaw[2], gx, gy, gz);
-    }
-  } else if (logUntilMs != 0 && (int32_t)(logUntilMs - millis()) > 0) {
-    // Logging: orientation plus every sensor. Accelerometer in g (calibrated if a
-    // calibration was set), gyro in deg/s (bias removed), magnetometer as the
-    // fusion sees it (counts, calibrated once the mag calibration has run).
-    if (millis() - lastLogMs >= LOG_INTERVAL_MS) {
-      lastLogMs = millis();
-      float roll, pitch, yaw;
-      quaternionToEuler(roll, pitch, yaw);
-      float heading = yaw < 0.0f ? yaw + 360.0f : yaw;
-      out.printf("LOG,%lu,%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
-                    (unsigned long)millis(), heading, pitch, roll, ax, ay, az, gx, gy, gz, mx, my, mz);
-    }
-  } else if (millis() - lastPrintMs >= PRINT_INTERVAL_MS) {
-    lastPrintMs = millis();
-    float roll, pitch, yaw;
-    quaternionToEuler(roll, pitch, yaw);
-    float heading = yaw < 0.0f ? yaw + 360.0f : yaw;
-    out.printf("Heading:%6.1f  Pitch:%6.1f  Roll:%6.1f  Gyro(dps) X:%7.2f Y:%7.2f Z:%7.2f\n",
-                  heading, pitch, roll, gx, gy, gz);
+  if (vizOn && nowMs - lastViz >= 20) {
+    lastViz = nowMs;
+    emitf("VIZ,%lu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f\n", (unsigned long)s.ms, s.q.w, s.q.x, s.q.y,
+          s.q.z, s.accRawG[0], s.accRawG[1], s.accRawG[2], s.gyroDps[0], s.gyroDps[1], s.gyroDps[2]);
   }
+  if (logOn && nowMs - lastLog >= 50) {
+    lastLog = nowMs;
+    emitf("LOG,%lu,%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.0f,%.0f,%.0f\n", (unsigned long)s.ms, heading, pitch,
+          roll, s.accG[0], s.accG[1], s.accG[2], s.gyroDps[0], s.gyroDps[1], s.gyroDps[2], s.mag[0], s.mag[1], s.mag[2]);
+  }
+  if (!trkOn && !vizOn && !logOn && nowMs - lastText >= 100) {
+    lastText = nowMs;
+    static const char *names[] = {"settling (hold still)", "still", "moving", "lost (hold still)"};
+    // bias removed, like the Teensy prints it
+    float gx = s.gyroDps[0] - s.bgDps.x, gy = s.gyroDps[1] - s.bgDps.y, gz = s.gyroDps[2] - s.bgDps.z;
+    emitf("Heading:%6.1f  Pitch:%6.1f  Roll:%6.1f  Gyro(dps) X:%7.2f Y:%7.2f Z:%7.2f   x %+6.3f y %+6.3f z %+6.3f m  %s, %lu moves\n",
+          heading, pitch, roll, gx, gy, gz, s.p.x, s.p.y, s.p.z, names[s.state > 3 ? 0 : s.state], (unsigned long)s.moves);
+  }
+  txFlush();
+  delay(2);
 }

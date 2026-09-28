@@ -10,6 +10,13 @@ class ParseTests(unittest.TestCase):
         self.assertEqual((ev["heading"], ev["pitch"], ev["roll"]), (0.2, -6.3, -135.9))
         self.assertEqual(ev["gyro"], [0.0, 0.07, -0.12])
 
+    def test_esp32_line(self):
+        # the ESP32 tracking firmware prints the same fields, then its position
+        ev = parse_attitude("Heading:  12.5  Pitch:  -1.0  Roll: 176.7  Gyro(dps) X:   0.01 Y:  -0.02 Z:   0.00"
+                            "   x +0.012 y -0.003 z +0.000 m  still, 3 moves")
+        self.assertEqual((ev["heading"], ev["pitch"], ev["roll"]), (12.5, -1.0, 176.7))
+        self.assertEqual(ev["gyro"], [0.01, -0.02, 0.0])
+
     def test_line_without_gyro(self):
         ev = parse_attitude("Heading: 297.0  Pitch:  -6.1  Roll:  43.2")
         self.assertEqual((ev["heading"], ev["pitch"], ev["roll"]), (297.0, -6.1, 43.2))

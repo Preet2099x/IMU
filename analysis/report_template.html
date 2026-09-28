@@ -1,0 +1,220 @@
+<title>Why IMU Position Fails</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap">
+<style>
+  :root {
+    --ground: #f3f6f8;
+    --panel: #ffffff;
+    --ink: #142029;
+    --dim: #53626e;
+    --line: #d5dde3;
+    --accent: #0a62c2;
+    --bad: #b3261e;
+    --good: #1b7a4b;
+    --code: #e8eef3;
+    --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --serif: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+    --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0d141a; --panel: #141d25; --ink: #e3ebf1; --dim: #9aa9b5; --line: #263440;
+      --accent: #6db3ff; --bad: #ff8a80; --good: #6fd6a0; --code: #1b2732; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0d141a; --panel: #141d25; --ink: #e3ebf1; --dim: #9aa9b5; --line: #263440;
+    --accent: #6db3ff; --bad: #ff8a80; --good: #6fd6a0; --code: #1b2732; color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--ground); color: var(--ink); font: 16px/1.6 var(--sans); padding-inline: 16px; padding-block: 28px 64px; }
+  main { max-width: 820px; margin-inline: auto; display: flex; flex-direction: column; gap: 40px; }
+  h1, h2, h3 { font-family: var(--serif); text-wrap: balance; line-height: 1.2; margin: 0; font-weight: 600; }
+  h1 { font-size: clamp(28px, 5vw, 40px); }
+  h2 { font-size: 24px; padding-top: 6px; }
+  h3 { font-size: 18px; }
+  p { margin: 0 0 12px; max-width: 68ch; }
+  a { color: var(--accent); }
+  .lede { font-size: 18px; color: var(--dim); max-width: 62ch; }
+  .verdict { background: var(--panel); border: 1px solid var(--line); border-left: 6px solid var(--bad); padding: 18px 20px; }
+  .verdict ul { margin: 8px 0 0; padding-left: 20px; }
+  .verdict li { margin-bottom: 6px; }
+  section { display: flex; flex-direction: column; gap: 10px; }
+  .eq { background: var(--panel); border: 1px solid var(--line); padding: 12px 16px; overflow-x: auto; font-size: 17px; }
+  .eq math { font-size: 1.1em; }
+  figure { margin: 8px 0; background: var(--panel); border: 1px solid var(--line); padding: 10px; }
+  figure img { display: block; width: 100%; height: auto; background: #fff; }
+  figcaption { font-size: 14px; color: var(--dim); padding: 8px 4px 2px; max-width: 72ch; }
+  .scroll { overflow-x: auto; border: 1px solid var(--line); background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 520px; }
+  th, td { padding: 8px 12px; border-bottom: 1px solid var(--line); text-align: right; font-variant-numeric: tabular-nums; }
+  thead th { font-weight: 600; color: var(--dim); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+  th[scope="row"], thead th:first-child { text-align: left; font-weight: 500; }
+  td { font-family: var(--mono); }
+  tbody tr:last-child > * { border-bottom: 0; }
+  code { font-family: var(--mono); font-size: 0.9em; background: var(--code); padding: 1px 5px; }
+  pre { background: var(--code); padding: 12px 14px; overflow-x: auto; font: 13px/1.5 var(--mono); margin: 0; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); padding: 12px 14px; }
+  .stat b { display: block; font: 500 22px/1.2 var(--mono); }
+  .stat span { font-size: 13px; color: var(--dim); }
+  .note { border: 1px dashed var(--line); padding: 14px 16px; background: var(--panel); }
+  .note h3 { margin-bottom: 6px; }
+  .note ul { margin: 0; padding-left: 20px; }
+  .note li { margin-bottom: 6px; }
+  .tex { font-family: var(--mono); font-size: 14px; }
+</style>
+
+<main>
+  <header>
+    <p class="lede" style="margin-bottom:8px">BMI088 accelerometer and gyro, BMM350 magnetometer, Teensy 4.0 / ESP32 · measured on the real board</p>
+    <h1>Why position cannot be recovered from this IMU</h1>
+  </header>
+
+  <div class="verdict">
+    <strong>Verdict.</strong> Adding an accelerometer's readings up twice gives a position that is wrong by metres within seconds of real movement, and nothing inside the IMU can detect or fix that. The evidence comes in three layers:
+    <ul>
+      <li><b>Maths.</b> A tilt error of 1° is a fake push of 0.17 m/s². It grows into <b>0.09 m after 1 s, 2.1 m after 5 s and 8.6 m after 10 s</b>. Position is not observable from the IMU alone.</li>
+      <li><b>Measurements on this board.</b> The sensors are good at rest (tilt known to 0.01°, gyro residual 0.012°/s), yet a board that never moved still "travels" a median <b>@@STILL_MED@@ cm</b> in 10 s, and 90% of the time up to @@STILL_P90@@ cm.</li>
+      <li><b>Real recordings.</b> A slide-left-and-back, hop-left-and-back that ended where it began was tracked <b>@@CLOSE@@ m away</b> after 25 s, and across eight real sessions one tracker or the other went more than 6 m from the start in four of them, and one reached 36 m.</li>
+    </ul>
+    <p style="margin:10px 0 0">What is accurate is <b>orientation</b> (roll, pitch, heading). What would be needed for position is a second source of position, such as a camera or UWB.</p>
+  </div>
+
+  <section id="chain">
+    <h2>From accelerometer to position</h2>
+    <p>The accelerometer does not measure acceleration. It measures <i>specific force</i>: gravity and movement mixed together, in the board's own axes.</p>
+    <div class="eq"><span class="math" data-tex="\mathbf f_b = R^{\mathsf T}\,(\mathbf a_e - \mathbf g_e) + \mathbf b + \mathbf n">f_b = Rᵀ (a_e − g_e) + b + n</span></div>
+    <p>Here <i>R</i> is the board's orientation, <i>b</i> the sensor's own bias and <i>n</i> noise. To get the movement <i>a<sub>e</sub></i>, the code must turn the reading into room axes with its <i>estimate</i> of the orientation, subtract gravity, and integrate twice:</p>
+    <div class="eq"><span class="math" data-tex="\hat{\mathbf a}_e = \hat R\,(\mathbf f_b - \hat{\mathbf b}) + \mathbf g_e,\qquad \mathbf v=\int \hat{\mathbf a}_e\,dt,\qquad \mathbf p=\int \mathbf v\,dt">â_e = R̂ (f_b − b̂) + g_e ; v = ∫ â_e dt ; p = ∫ v dt</span></div>
+    <p>Every error in <i>R̂</i> or <i>b̂</i> lands directly in <i>â<sub>e</sub></i>, and integrating twice multiplies it by time squared.</p>
+  </section>
+
+  <section id="growth">
+    <h2>How each error grows</h2>
+    <h3>1. A constant accelerometer error</h3>
+    <div class="eq"><span class="math" data-tex="\delta p(t) = \tfrac12\,\varepsilon\,t^{2}">δp = ½ ε t²</span></div>
+    <h3>2. A tilt error θ (the dominant one)</h3>
+    <p>If the estimated "down" is off by θ, a slice of gravity leaks into the horizontal axes as a constant fake acceleration <i>g</i> sin θ:</p>
+    <div class="eq"><span class="math" data-tex="\delta p(t) = \tfrac12\,g\,\sin\theta\;t^{2} \;\approx\; 0.086\,t^{2}\ \mathrm{m}\ \text{per degree}">δp = ½ g sin θ t²  ≈ 0.086 t² m per degree</span></div>
+    <h3>3. A gyro bias that tilt is not corrected against</h3>
+    <p>A gyro bias <i>b<sub>g</sub></i> turns the tilt estimate at a steady rate, θ = b<sub>g</sub> t, so the error grows with the cube of time:</p>
+    <div class="eq"><span class="math" data-tex="\delta p(t) = \tfrac16\,g\,b_g\,t^{3}">δp = ⅙ g b_g t³</span></div>
+    <h3>4. Accelerometer noise</h3>
+    <p>White noise σ per sample at interval Δt becomes a random walk in speed and a faster one in position:</p>
+    <div class="eq"><span class="math" data-tex="\delta p_{\mathrm{rms}}(t) = \sigma\sqrt{\tfrac{\Delta t}{3}}\;t^{3/2}">δp_rms = σ √(Δt/3) t^(3/2)</span></div>
+
+    <p>With this board's measured noise (0.026 m/s² per axis at 50 Hz) and gyro residual (@@GYRO_MED@@°/s) the curves are:</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Error source</th><th>1 s</th><th>2 s</th><th>5 s</th><th>10 s</th><th>30 s</th></tr></thead>
+      <tbody>@@GROWTH_ROWS@@</tbody>
+    </table></div>
+    <figure>
+      <img src="@@IMG_GROWTH@@" alt="Log-log chart of position error against time for tilt errors of 0.5, 1 and 3 degrees, the measured resting error, gyro bias and accelerometer noise; tilt errors reach 1 m within 1 to 3 seconds">
+      <figcaption>Position error against time on log axes. A tilt error crosses 10 cm within a second and 1 m within a few seconds. The tilt values are illustrative sizes, explained in the next section; the resting-error, gyro and noise curves use numbers measured on this board.</figcaption>
+    </figure>
+    <div class="note">
+      <h3>The bar to clear</h3>
+      <p>To hold 1 cm of position error for 10 s, tilt would have to be known to about <b>0.001°</b>. For 10 cm it is 0.012°. This board's tilt at rest is about @@TILT_MED@@° (median), and it is worse the moment it moves.</p>
+    </div>
+  </section>
+
+  <section id="tilt">
+    <h2>Why tilt breaks the moment you move</h2>
+    <p>The board's orientation filter (a Mahony filter in <code>src/main.cpp</code>) uses the accelerometer as its reference for "down". It only rejects a reading when the total is more than 0.15 g away from 1 g. A horizontal push of <i>a<sub>h</sub></i> that passes that gate is read partly as tilt, and drags the estimate at a rate set by the filter gain (<code>TWO_KP = 1</code>, so K<sub>p</sub> = 0.5):</p>
+    <div class="eq"><span class="math" data-tex="\dot\theta_{\text{error}} \approx K_p\,\frac{a_h}{g}">dθ_error/dt ≈ K_p · a_h / g</span></div>
+    <p>A hand move of 1 m/s² for one second therefore leaves about 0.5 × 0.102 rad/s × 1 s ≈ <b>2.9°</b> of tilt error. That is the "3°" in the chart, and it becomes a sustained fake push of 0.5 m/s² that nothing in the IMU can tell apart from real movement.</p>
+    <p>The recordings show the accelerometer really does read something other than gravity during movement: at rest the reading is within @@SF_REST@@ g of 1 g (median); while the board rotates faster than 20°/s it is off by @@SF_MOVE@@ g (median) and by @@SF_MOVE95@@ g at the 95th percentile.</p>
+    <figure>
+      <img src="@@IMG_FORCE@@" alt="Histogram of how far the accelerometer magnitude is from 1 g: tightly clustered near 0.02 g at rest, spread out to 0.5 g while the board is moved">
+      <figcaption>How far the accelerometer's length is from 1 g, for every sample in the recordings. Resting samples cluster tightly. Samples taken while the board is being moved spread widely, so gravity and movement cannot be separated from this signal alone.</figcaption>
+    </figure>
+  </section>
+
+  <section id="observability">
+    <h2>Why no filter can fix it</h2>
+    <p>This is not a tuning problem. With no outside measurement, nothing an accelerometer and gyro sense corrects an error in position, speed or heading: in the standard inertial-navigation error model they are <i>unobservable</i>. Aiding is needed. The most common trick is a zero-velocity update (ZUPT): when the sensor is known to be still, "speed = 0" is fed to a Kalman filter, which then also corrects tilt and bias.</p>
+    <p>That works for foot-mounted navigation because a foot is planted every step, so the speed error is reset every second or so. Papers on foot-mounted navigation describe it as turning error that grows with the cube of time into error that grows with the number of steps (see the sources below). A hand held in the air has no such rhythm: the recordings contain stretches of 20 s or more of continuous movement with nothing to reset against.</p>
+  </section>
+
+  <section id="board">
+    <h2>What this board measures at rest</h2>
+    <p>@@NWIN@@ separate 10-second stretches were found in the recordings where the board was at rest (rotation under 3°/s, steady reading), and the numbers below come from those.</p>
+    <div class="stats">
+      <div class="stat"><b>@@NOISE@@ m/s²</b><span>accelerometer noise, rms of three axes at 50 Hz</span></div>
+      <div class="stat"><b>@@EPS_MED@@ m/s²</b><span>sideways error of gravity removal at rest (median; 90th percentile @@EPS_P90@@)</span></div>
+      <div class="stat"><b>@@TILT_MED@@°</b><span>the same error as a tilt (90th percentile @@TILT_P90@@°)</span></div>
+      <div class="stat"><b>@@GYRO_MED@@°/s</b><span>gyro residual bias (90th percentile @@GYRO_P90@@°/s)</span></div>
+    </div>
+    <p>At rest this is a good sensor. Even so, adding the readings of a board that never moved up twice gives:</p>
+    <figure>
+      <img src="@@IMG_STILL@@" alt="Position against time for many real 10 second rests, each drifting away from zero; the black curve is the half epsilon t squared prediction">
+      <figcaption>Every red line is a real 10 s rest, integrated twice with no correction. The median drift is @@STILL_MED@@ cm in 10 s, the 90th percentile @@STILL_P90@@ cm, and the worst window @@STILL_MAX@@ m (probably not truly at rest; the automatic detector cannot say). The black line is the ½εt² prediction from the median error.</figcaption>
+    </figure>
+  </section>
+
+  <section id="real">
+    <h2>Real movement</h2>
+    <p>The clearest test needs no measuring rig: move the board and return it to where it started. The true final position is zero.</p>
+    <figure>
+      <img src="@@IMG_SLIDE@@" alt="Three stacked charts against 25 seconds: rotation rate, left-right speed and tracked position; position ends about 0.9 metres from the start though the board returned">
+      <figcaption>Recording: slide left, back to the start, hop left, hop back to the start (25 s). The tracker zeroes speed at every pause. The steps in the speed line are the speed error it had collected during each move: roughly 0.1–0.3 m/s, when the true speed at the end of a move is zero. It ends at (@@FINAL_X@@, @@FINAL_Y@@) m, <b>@@CLOSE@@ m from the true position of 0</b>.</figcaption>
+    </figure>
+    <p>Two trackers were run on every recording, neither tuned on these recordings: a simple one (speed zeroed when still, drift taken back at the end of each move) and a full ZUPT Kalman filter. The table shows the largest distance from the start each reached, and where it finished:</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Recording</th><th>Length</th><th>Simple, max</th><th>Simple, end</th><th>Kalman, max</th><th>Kalman, end</th></tr></thead>
+      <tbody>@@TRACKER_ROWS@@</tbody>
+    </table></div>
+    <p>These sessions were hand movements at a desk, so excursions of many metres are not plausible. The Kalman filter was worse than the simple tracker on most of them.</p>
+  </section>
+
+  <section id="tried">
+    <h2>What was tried, and what happened</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Approach</th><th style="text-align:left">Result on real data</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Plain double integration with gravity removed</th><td style="text-align:left;font-family:var(--sans)">Ran to about 12 m sideways during one 20 s wave of the board</td></tr>
+        <tr><th scope="row">Heuristic tracker with end-of-move correction</th><td style="text-align:left;font-family:var(--sans)">About 10 cm at the end of a slide-and-hop session that returned to the start; it caps long moves near where they began, so it cannot follow them</td></tr>
+        <tr><th scope="row">ZUPT error-state Kalman filter</th><td style="text-align:left;font-family:var(--sans)">Worse than the simple tracker on most recordings, up to 36 m</td></tr>
+        <tr><th scope="row">Holding tilt with the gyro only during moves</th><td style="text-align:left;font-family:var(--sans)">Worse (the 50 Hz gyro stream is too coarse: about 20% error in re-integrated rotation on the windows tested)</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section id="limits">
+    <div class="note">
+      <h3>What this evidence does not show</h3>
+      <ul>
+        <li>There was no motion-capture or ruler-based ground truth. Where a true answer is stated it is only "the board returned to where it started" or "it never moved".</li>
+        <li>The tilt error during movement is not measured directly (nothing on the board can do that). It is derived from the filter's gain and gate; the 3° figure is an example, not a measurement.</li>
+        <li>One board, one calibration, a few hundred seconds of hand movement. The rest windows were chosen by an automatic threshold.</li>
+        <li>A better sensor or filter would lower every curve by a fixed factor, not by the several-thousand-fold (from about 3° during movement to 0.001°) that the bar above needs.</li>
+      </ul>
+    </div>
+    <p>Everything here reproduces from the recordings:</p>
+    <pre>python analysis/position_limits.py   # measures, draws the figures
+python analysis/build_report.py      # writes this report</pre>
+  </section>
+
+  <section id="sources">
+    <h2>Sources</h2>
+    <p>On foot-mounted zero-velocity updates and why they are needed:</p>
+    <ul>
+      <li><a href="https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5713624/">A Novel 3D Pedestrian Navigation Method for a Multiple Sensors-Based Foot-Mounted Inertial System</a></li>
+      <li><a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC10745756/">The Improved Method for Indoor 3D Pedestrian Positioning Based on Dual Foot-Mounted IMU System</a></li>
+      <li><a href="https://arxiv.org/pdf/1910.00529">Robust Data-Driven Zero-Velocity Detection for Foot-Mounted Inertial Navigation</a></li>
+      <li><a href="https://arxiv.org/pdf/1707.01152">Improving Foot-Mounted Inertial Navigation (arXiv 1707.01152)</a></li>
+    </ul>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+<script>
+  // Equations are rendered to MathML (no stylesheet needed); the plain-text form stays if KaTeX did not load.
+  try {
+    document.querySelectorAll(".math").forEach(function (el) {
+      var tex = el.getAttribute("data-tex");
+      if (window.katex && tex) window.katex.render(tex, el, { output: "mathml", displayMode: true, throwOnError: false });
+    });
+  } catch (e) { /* keep the text fallback */ }
+</script>

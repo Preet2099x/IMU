@@ -4,3 +4,7 @@
 .vscode/launch.json
 .vscode/ipch
 src/wifi_config.h
+.board_address
+
+# RIDI trained models (2 GB) and their converted copies
+ridi_imu-master/ridi_imu_models/
