@@ -29,8 +29,6 @@ TEENSY_VID = 0x16C0
 TEENSY_PID = 0x0483
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 FRAME_MS = 50
-
-STATE_COLOR = {"READY": "tab:green", "MOVING": "tab:orange"}
 AXIS_COLORS = ("tab:red", "tab:green", "tab:blue")  # board x, y, z
 
 
@@ -152,8 +150,7 @@ class View:
         self.ax3d = self.fig.add_subplot(1, 2, 1, projection="3d")
         self.ax3d.view_init(elev=22, azim=-150)  # from behind and to the right of the start
         self.ax2d = self.fig.add_subplot(1, 2, 2)
-        self.fig.subplots_adjust(left=0.03, right=0.97, top=0.88, bottom=0.12, wspace=0.15)
-        self.title = self.fig.suptitle("", fontsize=15, fontweight="bold")
+        self.fig.subplots_adjust(left=0.03, right=0.97, top=0.94, bottom=0.12, wspace=0.15)
         self.info = self.fig.text(0.5, 0.025, "", ha="center", fontsize=12)
         self.drawn_version = None
         self.center, self.half = [0.0, 0.0, 0.0], 20.0
@@ -252,10 +249,11 @@ class View:
             self.dot2d.set_data([-p[1]], [p[0]])
             self.ax2d.set_title(f"From above (red line = board's x axis)   |   height {p[2]:+.1f} cm")
 
-        self.title.set_text(f"{b.state}: {b.message}")
-        self.title.set_color(STATE_COLOR.get(b.state, "dimgray"))
-        self.info.set_text(b.headline or "No moves yet. Press F, then push the board forward once "
-                           "to set forward. Z zeroes.")
+        if b.state == "CONNECTING":
+            self.info.set_text(b.message)  # e.g. another serial monitor holds the port
+        else:
+            self.info.set_text(b.headline or "No moves yet. Press F, then push the board forward once "
+                               "to set forward. Z zeroes.")
 
     def frame(self):
         b = self.board
