@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IMU Motion</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="scene"></div>
+  <div class="vignette"></div>
+
+  <header class="topbar">
+    <div class="brand"><span class="logo"></span>IMU Motion</div>
+    <div id="link" class="pill"><span class="dot"></span><span class="text">Connecting…</span></div>
+    <div class="state-wrap">
+      <div id="state" class="pill"><span class="dot"></span><span class="text">Waiting</span></div>
+      <div id="state-note" class="state-note"></div>
+    </div>
+  </header>
+
+  <div class="left-col">
+    <aside class="card stats">
+      <div class="card-title">Position</div>
+      <div class="readout"><span class="axis">Forward</span><span id="px" class="num">0.0</span><span class="unit">cm</span></div>
+      <div class="readout"><span class="axis">Left</span><span id="py" class="num">0.0</span><span class="unit">cm</span></div>
+      <div class="readout"><span class="axis">Up</span><span id="pz" class="num">0.0</span><span class="unit">cm</span></div>
+      <div class="divider"></div>
+      <div class="readout small"><span class="axis">From start</span><span id="pdist" class="num">0.0</span><span class="unit">cm</span></div>
+      <div class="readout small"><span class="axis">Moves</span><span id="pcount" class="num">0</span><span class="unit"></span></div>
+    </aside>
+
+    <aside class="card distance">
+      <div class="card-title">Distance travelled</div>
+      <div class="total"><span id="dist-total" class="num">0.0</span><span class="unit">cm</span></div>
+      <div id="dist-formula" class="formula">No steps yet</div>
+      <div class="divider"></div>
+      <div class="readout small"><span class="axis">Steps</span><span id="dist-steps" class="num">0</span><span class="unit"></span></div>
+      <div class="readout small"><span class="axis">Average step</span><span id="dist-avg" class="num">0.0</span><span class="unit">cm</span></div>
+    </aside>
+  </div>
+
+  <aside class="card moves">
+    <div class="card-title">Recent steps</div>
+    <ol id="move-list"></ol>
+    <div id="move-empty" class="empty">No moves yet. Press <kbd>F</kbd>, then push the board forward once to set which way is forward.</div>
+  </aside>
+
+  <div class="card minimap">
+    <div class="card-title">Top view</div>
+    <div id="minimap-view" class="minimap-view"></div>
+  </div>
+
+  <nav class="toolbar">
+    <button data-cmd="f" title="Then push the board forward once"><kbd>F</kbd>Set forward</button>
+    <button data-cmd="z" title="Put the board back at the start and clear the drawn moves"><kbd>Z</kbd>Reset position</button>
+    <button data-cmd="r" title="Start counting steps and distance from zero"><kbd>R</kbd>Reset steps</button>
+    <span class="sep"></span>
+    <button id="btn-follow" class="toggle on" title="Keep the camera on the board"><kbd>A</kbd>Follow</button>
+    <button id="btn-fit" title="Frame the whole session"><kbd>W</kbd>Fit all</button>
+    <button id="btn-top" title="Look straight down"><kbd>T</kbd>Top</button>
+    <button id="btn-3d" title="Back to the 3D angle"><kbd>3</kbd>3D</button>
+  </nav>
+
+  <div class="help">Drag to orbit · right-drag to pan · scroll to zoom</div>
+  <div id="toasts"></div>
+  <div id="loading" class="loading">Loading 3D engine…</div>
+
+  <script>
+    // app.js hides this once three.js has loaded; if it never does, say why.
+    setTimeout(() => {
+      const el = document.getElementById('loading');
+      if (el && !el.hidden) {
+        el.textContent = "Couldn't load the 3D engine. It comes from cdn.jsdelivr.net, so this computer needs internet access.";
+      }
+    }, 10000);
+  </script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
