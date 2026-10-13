@@ -33,9 +33,9 @@
   <div class="left-col">
     <aside class="card stats">
       <div class="card-title">Position</div>
-      <div class="readout"><span class="axis">Forward</span><span id="px" class="num">0.0</span><span class="unit">cm</span></div>
-      <div class="readout"><span class="axis">Left</span><span id="py" class="num">0.0</span><span class="unit">cm</span></div>
-      <div class="readout"><span class="axis">Up</span><span id="pz" class="num">0.0</span><span class="unit">cm</span></div>
+      <div class="readout"><span class="axis ax-x">Forward</span><span id="px" class="num">0.0</span><span class="unit">cm</span></div>
+      <div class="readout"><span class="axis ax-y">Left</span><span id="py" class="num">0.0</span><span class="unit">cm</span></div>
+      <div class="readout"><span class="axis ax-z">Up</span><span id="pz" class="num">0.0</span><span class="unit">cm</span></div>
       <div class="divider"></div>
       <div class="readout small"><span class="axis">From start</span><span id="pdist" class="num">0.0</span><span class="unit">cm</span></div>
       <div class="readout small"><span class="axis">Moves</span><span id="pcount" class="num">0</span><span class="unit"></span></div>
@@ -71,9 +71,10 @@
     <button id="btn-fit" title="Frame the whole session"><kbd>W</kbd>Fit all</button>
     <button id="btn-top" title="Look straight down"><kbd>T</kbd>Top</button>
     <button id="btn-3d" title="Back to the 3D angle"><kbd>3</kbd>3D</button>
+    <button id="btn-axes" class="toggle on" title="Show or hide the X, Y and Z axes"><kbd>X</kbd>Axes</button>
   </nav>
 
-  <div class="help">Drag to orbit · right-drag to pan · scroll to zoom</div>
+  <div class="help">Each big square = 1 m, lines every 10 cm up close · drag to orbit · right-drag to pan · scroll to zoom</div>
   <div id="toasts"></div>
   <div id="loading" class="loading">Loading 3D engine…</div>
 

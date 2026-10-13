@@ -133,7 +133,9 @@ class Link:
                                 raw, buf = buf.split(b"\n", 1)
                                 line = raw.decode(errors="replace").rstrip()
                                 log.write(line + "\n")
-                                if not line.startswith("@LIVE"):  # 25 a second, too many to read
+                                # @LIVE is 25 a second and the raw R samples 400, too many to
+                                # read; the log keeps them all.
+                                if not line.startswith(("@LIVE", "R ", "RX ")):
                                     print(line, flush=True)
                                 if self.skip_mag and "SKIP mag calibration" in line:
                                     ser.write(b"s")

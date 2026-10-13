@@ -76,8 +76,25 @@ function makeGrid(size, divisions, color, opacity) {
   return grid;
 }
 const ground = new THREE.Group();
-ground.add(makeGrid(8000, 800, 0x1e293b, 0.4)); // 10 cm
-ground.add(makeGrid(8000, 80, 0x334155, 0.5));  // 1 m
+// One square is exactly 1 m (80 m across in 80 squares), so a distance can be
+// read straight off the floor. The group is moved in whole metres below, so the
+// lines always stay on whole metres of the board's own coordinates.
+ground.add(makeGrid(8000, 80, 0x4a5a78, 0.8));
+// Each square is split into ten, 10 cm apart. Only drawn when zoomed in: from
+// further away these lines are a few pixels apart and blur into a haze.
+const FINE_GRID_OPACITY = 0.5;
+const fineGrid = makeGrid(8000, 800, 0x34425f, FINE_GRID_OPACITY);
+fineGrid.renderOrder = -1; // under the 1 m lines
+ground.add(fineGrid);
+
+function setFineGrid(fade) {
+  fineGrid.visible = fade > 0.01;
+  fineGrid.material.opacity = FINE_GRID_OPACITY * fade;
+  for (const m of axisMinor) {
+    m.visible = fade > 0.01;
+    m.material.opacity = 0.6 * fade;
+  }
+}
 scene.add(ground);
 
 function label(text, className) {
@@ -89,7 +106,8 @@ function label(text, className) {
   return new CSS2DObject(outer);
 }
 
-// Start marker and a compass, scaled with the camera so they stay readable.
+// Start marker, scaled with the camera so it stays readable. The axes are
+// separate (below), drawn in true metres.
 const origin = new THREE.Group();
 {
   const ring = new THREE.Mesh(
@@ -100,12 +118,6 @@ const origin = new THREE.Group();
   const start = label('Start', 'ground-label');
   start.position.set(0, 0, 9);
   origin.add(start);
-  for (const [dir, text] of [[toScene(1, 0, 0), 'Forward'], [toScene(0, 1, 0), 'Left']]) {
-    origin.add(new THREE.ArrowHelper(dir, new THREE.Vector3(), 22, 0x94a3b8, 4, 2.6));
-    const tag = label(text, 'ground-label');
-    tag.position.copy(dir.clone().multiplyScalar(30));
-    origin.add(tag);
-  }
 }
 scene.add(origin);
 
@@ -190,6 +202,130 @@ function gradient(n, from, to) {
 }
 
 // ---------------------------------------------------------------------------
+// World axes through the start: X forward, Y left, Z up. The ticks sit on the
+// same whole metres as the floor squares, with a number on each, so a position
+// can be read straight off. They grow in 5 m steps if the board goes past an end.
+
+const AXES = [
+  { name: 'X · Forward', dir: toScene(1, 0, 0), tick: toScene(0, 1, 0), color: new THREE.Color('#f87171'), css: '#f87171' },
+  { name: 'Y · Left', dir: toScene(0, 1, 0), tick: toScene(1, 0, 0), color: new THREE.Color('#4ade80'), css: '#4ade80' },
+  { name: 'Z · Up', dir: toScene(0, 0, 1), tick: toScene(1, 0, 0), color: new THREE.Color('#60a5fa'), css: '#60a5fa' },
+];
+const axesGroup = new THREE.Group();
+scene.add(axesGroup);
+let axisHalf = { h: 10, v: 5 }; // metres each way: horizontal axes, vertical axis
+let axisTicks = [];             // { obj, m }: the number labels, thinned out with distance
+let axisCones = [];             // arrowheads, kept a readable size
+let axisNames = [];             // the X / Y / Z name labels
+let axisMinor = [];             // the 10 cm tick sets, faded with the fine grid
+let axesOn = true;              // the Axes button; remembered between visits
+try {
+  axesOn = localStorage.getItem('imu.axes') !== 'off';
+} catch (e) { /* storage can be blocked; the default is on */ }
+
+// Show or hide the axes, their ticks, numbers and names.
+function setAxes(on) {
+  axesOn = on;
+  axesGroup.visible = on;
+  const button = document.getElementById('btn-axes');
+  if (button) button.classList.toggle('on', on);
+  try {
+    localStorage.setItem('imu.axes', on ? 'on' : 'off');
+  } catch (e) { /* not remembered, still works */ }
+}
+const axisLines = [];
+
+function clearAxes() {
+  for (const l of axisLines) disposeLine(l);
+  axisLines.length = 0;
+  for (const child of [...axesGroup.children]) {
+    axesGroup.remove(child);
+    if (child.isCSS2DObject) child.element.remove();
+    if (child.geometry) child.geometry.dispose();
+    if (child.material) child.material.dispose();
+  }
+  axisTicks = [];
+  axisCones = [];
+  axisNames = [];
+  axisMinor = [];
+}
+
+function buildAxes() {
+  clearAxes();
+  AXES.forEach((a, i) => {
+    const half = i === 2 ? axisHalf.v : axisHalf.h;
+    const L = half * 100; // cm each way
+    const zero = new THREE.Vector3();
+    const neg = a.dir.clone().multiplyScalar(-L);
+    const pos = a.dir.clone().multiplyScalar(L);
+    const faint = a.color.clone().multiplyScalar(0.55);
+
+    const back = fatLine([neg, zero], [faint, faint], 1.6, 0.45);
+    const fwd = fatLine([zero, pos], [a.color, a.color], 2.4, 0.95);
+    axesGroup.add(back, fwd);
+    axisLines.push(back, fwd);
+
+    // a tick and a number on every metre, the ticks longer on every fifth
+    const verts = [];
+    for (let m = -half; m <= half; m++) {
+      if (m === 0) continue;
+      const len = m % 5 === 0 ? 10 : 5;
+      const p = a.dir.clone().multiplyScalar(m * 100);
+      verts.push(p.clone().addScaledVector(a.tick, -len), p.clone().addScaledVector(a.tick, len));
+      const tag = label(String(m), 'axis-tick');
+      tag.element.firstChild.style.color = a.css;
+      tag.position.copy(p).addScaledVector(a.tick, 16);
+      axesGroup.add(tag);
+      axisTicks.push({ obj: tag, m });
+    }
+    axesGroup.add(new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints(verts),
+      new THREE.LineBasicMaterial({ color: a.color, transparent: true, opacity: 0.75 })));
+
+    // a short tick every 10 cm between the metres, shown only when zoomed in
+    const minorVerts = [];
+    for (let k = -half * 10; k <= half * 10; k++) {
+      if (k % 10 === 0) continue;
+      const p = a.dir.clone().multiplyScalar(k * 10);
+      minorVerts.push(p.clone().addScaledVector(a.tick, -2.5), p.clone().addScaledVector(a.tick, 2.5));
+    }
+    const minor = new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints(minorVerts),
+      new THREE.LineBasicMaterial({ color: a.color, transparent: true, opacity: 0 }));
+    minor.visible = false;
+    axesGroup.add(minor);
+    axisMinor.push(minor);
+
+    // arrowhead and name at the positive end
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(2.2, 9, 16), new THREE.MeshBasicMaterial({ color: a.color }));
+    cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), a.dir);
+    cone.position.copy(pos);
+    axesGroup.add(cone);
+    axisCones.push(cone);
+    const name = label(a.name, 'axis-name');
+    name.element.firstChild.style.color = a.css;
+    name.position.copy(pos).addScaledVector(a.dir, 40);
+    axesGroup.add(name);
+    axisNames.push(name);
+  });
+}
+
+// Lengthen the axes when a position (cm, earth frame) is near an end.
+function ensureAxes(x, y, z) {
+  const h = Math.max(Math.abs(x), Math.abs(y)) / 100;
+  const v = Math.abs(z) / 100;
+  let H = axisHalf.h;
+  let V = axisHalf.v;
+  while (h > H - 1) H += 5;
+  while (v > V - 1) V += 5;
+  if (H !== axisHalf.h || V !== axisHalf.v) {
+    axisHalf = { h: H, v: V };
+    buildAxes();
+  }
+}
+buildAxes();
+
+// ---------------------------------------------------------------------------
 // Finished moves
 
 let moves = []; // { n, start, end, text, points, group, line, glow, cone, label }
@@ -198,6 +334,7 @@ const paths = new Map(); // n -> path from @PATH, earth cm
 function addMove(n, start, end, text) {
   const raw = paths.get(n) ?? [start, end];
   paths.delete(n);
+  for (const p of raw) ensureAxes(p[0], p[1], p[2]);
   const points = raw.map((p) => toScene(...p));
   const group = new THREE.Group();
   const line = fatLine(points, gradient(points.length, COLOR.recent, COLOR.recent), 3, 1);
@@ -326,6 +463,7 @@ function onLive(v) {
     redrawTrail();
   }
   lastLive = v.slice(0, 3);
+  ensureAxes(v[0], v[1], v[2]);
   setReadouts();
 }
 
@@ -570,6 +708,8 @@ $('btn-follow').addEventListener('click', () => setFollow(!follow));
 $('btn-fit').addEventListener('click', fitAll);
 $('btn-top').addEventListener('click', topView);
 $('btn-3d').addEventListener('click', view3d);
+$('btn-axes').addEventListener('click', () => setAxes(!axesOn));
+setAxes(axesOn); // apply the remembered choice
 addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const key = e.key.toLowerCase();
@@ -578,6 +718,7 @@ addEventListener('keydown', (e) => {
   else if (key === 'w') fitAll();
   else if (key === 't') topView();
   else if (key === '3') view3d();
+  else if (key === 'x') setAxes(!axesOn);
 });
 
 addEventListener('resize', () => {
@@ -627,6 +768,9 @@ function renderMap() {
   // The board and markers are sized for the main camera; size them for the
   // inset instead while it draws (the board about a twelfth of its width).
   setMarkerScale((half * aspect * 2) / 12 / 10);
+  // 10 cm lines only when the inset is a few metres wide (the main view sets it
+  // again at the start of every frame).
+  setFineGrid(THREE.MathUtils.clamp((500 - half * aspect * 2) / 250, 0, 1));
   drop.visible = false;
   for (const m of lineMaterials) m.resolution.set(rect.width, rect.height);
   scene.fog = null;
@@ -696,6 +840,11 @@ function frame() {
   const distance = camera.position.distanceTo(controls.target);
   const s = THREE.MathUtils.clamp(distance / 120, 0.5, 120);
   setMarkerScale(s);
+  setFineGrid(THREE.MathUtils.clamp((1600 - distance) / 1000, 0, 1));
+  const tickStep = distance < 1500 ? 1 : distance < 3500 ? 2 : distance < 8000 ? 5 : 10;
+  for (const t of axisTicks) t.obj.visible = axesOn && t.m % tickStep === 0;
+  for (const n of axisNames) n.visible = axesOn;
+  for (const c of axisCones) c.scale.setScalar(s * 0.5); // smaller than the board's, so the Z one isn't a blob from above
   dropMaterial.dashSize = 3 * s;
   dropMaterial.gapSize = 2 * s;
   marker.material.opacity = state === 'MOVING' ? 0.45 + 0.35 * Math.sin(clock.elapsedTime * 8) : 0.6;

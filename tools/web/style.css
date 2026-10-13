@@ -374,6 +374,34 @@ kbd {
   color: #fff;
 }
 
+.axis-tick {
+  font: 600 10px var(--mono);
+  opacity: 0.9;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.9);
+}
+
+.axis-name {
+  font: 700 11px Inter, sans-serif;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.9);
+}
+
+/* the position readouts use the same colours as the axes in the scene */
+.readout .axis.ax-x::before,
+.readout .axis.ax-y::before,
+.readout .axis.ax-z::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 8px;
+  border-radius: 50%;
+}
+.readout .axis.ax-x::before { background: #f87171; }
+.readout .axis.ax-y::before { background: #4ade80; }
+.readout .axis.ax-z::before { background: #60a5fa; }
+
 .ground-label {
   color: rgba(203, 213, 225, 0.55);
   font: 600 10px Inter, sans-serif;

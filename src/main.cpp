@@ -11,9 +11,10 @@ constexpr uint8_t GYR_ADDR = 0x68;
 constexpr uint8_t MAG_ADDR = 0x15;
 
 // Scale factors must match the ranges configured in setup().
-// Only hard moves (over 0.5 g) count, and a hand jab can peak at several g, so
-// leave plenty of headroom above that.
-constexpr float ACC_RANGE_G = 12.0f;                        // ACC_RANGE = 0x02
+// A heel strike on a shoe can pass 12 g, and a clipped impact leaves the
+// velocity wrong at the end of every swing, so run the widest range. One count
+// is 0.73 mg there, still well under the accelerometer's noise.
+constexpr float ACC_RANGE_G = 24.0f;                        // ACC_RANGE = 0x03
 constexpr float ACC_LSB_PER_G = 32768.0f / ACC_RANGE_G;
 // A narrow gyro range clips on taps and bumps, and clipped spikes integrate
 // into a permanent heading error, so run at full scale.
@@ -81,6 +82,7 @@ int calSampleCount = 0;
 float gyroBiasDps[3] = {0.0f, 0.0f, 0.0f};
 float gravityG = 1.0f; // |accel| of the still board, measured with the gyro bias
 uint32_t gyroSaturations = 0; // samples that hit the gyro's ±2000 dps limit
+bool rawStream = true;        // send every sample as an R line (see the protocol notes)
 float magNoiseFloor[3] = {0.0f, 0.0f, 0.0f};
 
 // Quaternion of the sensor frame relative to the earth frame.
@@ -109,7 +111,7 @@ void setupBMI088Accel() {
   delay(5);
   writeReg(ACC_ADDR, 0x7C, 0x00); // ACC_PWR_CONF: active mode
   writeReg(ACC_ADDR, 0x40, 0xAA); // ACC_CONF: normal filter, ODR 400 Hz (matches the gyro)
-  writeReg(ACC_ADDR, 0x41, 0x02); // ACC_RANGE: ±12g
+  writeReg(ACC_ADDR, 0x41, 0x03); // ACC_RANGE: ±24g
   delay(50);
 }
 
@@ -636,10 +638,18 @@ void quaternionToEuler(float &rollDeg, float &pitchDeg, float &yawDeg) {
 //   @PATH <n> <x y z> <x y z> ...            the path move n took, sent just before its @MOVE
 //   @MOVE <n> <x0 y0 z0> <x1 y1 z1> | <text> a move from start to end, earth frame, cm
 //   @INFO <text>                             something worth showing that isn't a move
+//   @STEPS <count> <average cm> <total cm>   every measured move is a step; total distance
+//                                            is the count times the average step
 //   @LIVE <x y z> <board x axis> <board y axis> <board z axis>
 //                                            25 times a second: where the board is now (cm)
 //                                            and which way its axes point, earth frame
-// Sending 'z' zeroes the position; sending 'f' makes the next push define forward.
+// Sending 'z' zeroes the position, 'r' resets the step count, and 'f' makes the
+// next push define forward.
+//
+// Every gyro sample is also sent as "R <us> <gyro counts x3> <accel counts x3>"
+// ("RX <us>" marks a gap after a FIFO overrun), so a session can be replayed
+// offline through other trackers. The viewer keeps them in the log without
+// printing them; sending 'x' turns the stream off and on.
 
 constexpr float GRAVITY_MS2 = 9.80665f;
 
@@ -718,6 +728,11 @@ bool alignPending = false; // the next move sets which way is forward
 float moveStartQ[4];
 int moveCount = 0;
 float position[3] = {0.0f, 0.0f, 0.0f}; // sum of every reported move, m
+
+// Every measured move counts as a step, and the distance travelled is the
+// number of steps times the average step length.
+int stepCount = 0;
+float stepSumM = 0.0f;
 
 // Running estimate while a move is under way, so the plot can follow it live.
 // It uses the gravity reference from before the move but can't apply the
@@ -817,6 +832,11 @@ void reportLive() {
                 1.0f - 2.0f * (y * y + z * z), 2.0f * (x * y + w * z), 2.0f * (x * z - w * y),
                 2.0f * (x * y - w * z), 1.0f - 2.0f * (x * x + z * z), 2.0f * (y * z + w * x),
                 2.0f * (x * z + w * y), 2.0f * (y * z - w * x), 1.0f - 2.0f * (x * x + y * y));
+}
+
+void reportSteps() {
+  float averageM = stepCount ? stepSumM / stepCount : 0.0f;
+  Serial.printf("@STEPS %d %.1f %.1f\n", stepCount, averageM * 100.0f, averageM * stepCount * 100.0f);
 }
 
 void enterRest() {
@@ -1099,13 +1119,16 @@ void finishMove(float dt) {
   } else {
     float start[3] = {position[0], position[1], position[2]};
     for (int k = 0; k < 3; k++) position[k] += d[k];
+    stepCount++;
+    stepSumM += distM;
 
     char dir[48];
     describeDirection(d, dir, sizeof dir);
     float dBoard[3];
     rotateByQuat(moveStartQ, d, dBoard, true);
 
-    Serial.printf("MOVE %d: %.1f cm %s, in %.2f s\n", moveCount, distM * 100.0f, dir, activeS);
+    Serial.printf("MOVE %d (step %d): %.1f cm %s, in %.2f s\n", moveCount, stepCount, distM * 100.0f, dir,
+                  activeS);
     Serial.printf("  earth (cm): X %+6.1f  Y %+6.1f  Z %+6.1f    board axes (cm): x %+6.1f  y %+6.1f  z %+6.1f\n",
                   d[0] * 100.0f, d[1] * 100.0f, d[2] * 100.0f,
                   dBoard[0] * 100.0f, dBoard[1] * 100.0f, dBoard[2] * 100.0f);
@@ -1115,10 +1138,13 @@ void finishMove(float dt) {
                     (start[1] + pathBuf[j][1]) * 100.0f, (start[2] + pathBuf[j][2]) * 100.0f);
     }
     Serial.println();
-    Serial.printf("@MOVE %d %.2f %.2f %.2f %.2f %.2f %.2f | Move %d: %.1f cm %s, in %.2f s\n",
+    Serial.printf("@MOVE %d %.2f %.2f %.2f %.2f %.2f %.2f | Step %d: %.1f cm %s, in %.2f s\n",
                   moveCount, start[0] * 100.0f, start[1] * 100.0f, start[2] * 100.0f,
                   position[0] * 100.0f, position[1] * 100.0f, position[2] * 100.0f,
-                  moveCount, distM * 100.0f, dir, activeS);
+                  stepCount, distM * 100.0f, dir, activeS);
+    Serial.printf("  steps: %d, average %.1f cm, distance travelled %.1f cm\n", stepCount,
+                  stepSumM / stepCount * 100.0f, stepSumM * 100.0f);
+    reportSteps();
   }
   Serial.printf("  peak %.2f m/s | end drift %.1f cm/s | gravity ref %s/%s, shift %.1f mg | turned %.0f deg"
                 " | solved on the Teensy in %lu us\n",
@@ -1217,6 +1243,7 @@ void setup() {
   Serial.println("=== IMU startup ===");
   Serial.println("@RESET");
   Serial.println("@STATE CALIBRATING keep the board still - measuring gyro bias");
+  Serial.printf("Accelerometer range +-%.0f g, %.0f counts per g\n", ACC_RANGE_G, ACC_LSB_PER_G);
   Serial.println("Keep the board STILL for gyro bias calibration...");
   delay(1500);
   calibrateGyroBias();
@@ -1276,6 +1303,8 @@ void loop() {
   static uint32_t overrunCount = 0;
   static int maxBatch = 0;
   static uint32_t accelNewCount = 0;
+  static float accelPeakG = 0.0f;       // hardest hit since the last status line
+  static uint32_t accelSatCount = 0;    // samples at the limit of the accel range
   static GyroWindow biasWindow = {};
   static uint32_t biasUpdates = 0;
 
@@ -1285,7 +1314,17 @@ void loop() {
       for (int k = 0; k < 3; k++) position[k] = 0.0f;
       Serial.println("Position zeroed.");
       Serial.println("@RESET");
+      Serial.println("@INFO Position reset");
       reportState();
+    } else if (c == 'r') {
+      stepCount = 0;
+      stepSumM = 0.0f;
+      Serial.println("Steps reset.");
+      Serial.println("@INFO Steps reset");
+      reportSteps();
+    } else if (c == 'x') {
+      rawStream = !rawStream;
+      Serial.printf("@INFO Raw sample stream %s\n", rawStream ? "on" : "off");
     } else if (c == 'f') {
       if (useMagInFusion) {
         Serial.println("@INFO Forward follows magnetic north while the magnetometer is in use");
@@ -1313,6 +1352,12 @@ void loop() {
   float prevAx = ax, prevAy = ay, prevAz = az;
   accelValid = readAccelG(ax, ay, az);
   if (accelValid && (ax != prevAx || ay != prevAy || az != prevAz)) accelNewCount++;
+  if (accelValid) {
+    // How hard the board is hit, and whether it ever reaches the end of the range.
+    float peak = fmaxf(fabsf(ax), fmaxf(fabsf(ay), fabsf(az)));
+    accelPeakG = fmaxf(accelPeakG, peak);
+    if (peak >= 0.999f * ACC_RANGE_G) accelSatCount++;
+  }
 
   int16_t frames[100][3];
   bool overrun;
@@ -1320,6 +1365,7 @@ void loop() {
   if (overrun) {
     // Samples were dropped, so this batch doesn't cover the elapsed time.
     overrunCount++;
+    if (rawStream) Serial.printf("RX %lu\n", (unsigned long)nowUs);
     flushGyroFifo();
     odrWindowStartUs = micros();
     odrWindowFrames = 0;
@@ -1337,6 +1383,11 @@ void loop() {
   if (n > maxBatch) maxBatch = n;
 
   for (int i = 0; i < n; i++) {
+    if (rawStream) {
+      Serial.printf("R %lu %d %d %d %ld %ld %ld\n", (unsigned long)nowUs, frames[i][0], frames[i][1],
+                    frames[i][2], lroundf(ax * ACC_LSB_PER_G), lroundf(ay * ACC_LSB_PER_G),
+                    lroundf(az * ACC_LSB_PER_G));
+    }
     for (int k = 0; k < 3; k++) {
       if (frames[i][k] >= 32767 || frames[i][k] <= -32767) {
         gyroSaturations++;
@@ -1394,7 +1445,8 @@ void loop() {
   if (millis() - lastPrintMs >= PRINT_INTERVAL_MS) {
     uint32_t elapsedMs = millis() - lastPrintMs;
     lastPrintMs = millis();
-    reportState(); // repeated so a plot opened mid-session picks the state up
+    reportState(); // repeated so a plot opened mid-session picks these up
+    reportSteps();
     if (drState != DrState::Moving) {
       float roll, pitch, yaw;
       quaternionToEuler(roll, pitch, yaw);
@@ -1402,10 +1454,12 @@ void loop() {
       static const char *const stateName[] = {"SETTLING", "REST", "MOVING"};
       Serial.printf("Heading:%6.1f  Pitch:%6.1f  Roll:%6.1f  Gyro(dps) X:%7.2f Y:%7.2f Z:%7.2f\n",
                     heading, pitch, roll, gx, gy, gz);
-      Serial.printf("DIAG rest=%d odr=%.1f accHz=%lu maxBatch=%d overruns=%lu saturations=%lu bias=%.4f %.4f %.4f (updates %lu)\n",
+      Serial.printf("DIAG rest=%d odr=%.1f accHz=%lu maxBatch=%d overruns=%lu saturations=%lu bias=%.4f %.4f %.4f (updates %lu) accPeak=%.1fg accSat=%lu\n",
                     atRest, 1.0f / dtSample, (unsigned long)(accelNewCount * 1000UL / elapsedMs),
                     maxBatch, (unsigned long)overrunCount, (unsigned long)gyroSaturations,
-                    gyroBiasDps[0], gyroBiasDps[1], gyroBiasDps[2], (unsigned long)biasUpdates);
+                    gyroBiasDps[0], gyroBiasDps[1], gyroBiasDps[2], (unsigned long)biasUpdates,
+                    accelPeakG, (unsigned long)accelSatCount);
+      accelPeakG = 0.0f;
       Serial.printf("DR %s moves=%d | linear accel peak %.3f g (motion above %.1f g, rest below)\n",
                     stateName[(int)drState], moveCount, peakLinG, MOTION_ACCEL_G);
     }
