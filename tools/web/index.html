@@ -92,6 +92,29 @@
     <div id="minimap-view" class="minimap-view"></div>
   </div>
 
+  <div class="card accel" id="accel" title="How hard the board is being pushed right now, with gravity taken out, so it reads about 0 at rest. The bar is squeezed so small pushes stay visible, up to the sensor's 24 g limit. The white mark is fixed at 0.5 g, the push at which a move starts counting. 'peak' is the hardest push in the last 3 seconds.">
+    <div class="accel-top">
+      <span class="accel-title">Acceleration</span>
+      <span class="accel-value"><span id="acc-lin" class="num">–</span><span class="unit">g</span></span>
+      <span class="accel-peak">peak <b id="acc-hold">–</b> g</span>
+    </div>
+    <div class="accel-bar">
+      <div id="acc-fill" class="accel-fill"></div>
+      <div id="acc-mark" class="accel-mark"></div>
+      <span class="tick mark-label" style="left: 12.6%">0.5</span>
+      <span class="tick" style="left: 21.5%">1</span>
+      <span class="tick" style="left: 50%">4</span>
+      <span class="tick" style="left: 79.7%">12</span>
+      <span class="tick end">24 g</span>
+    </div>
+    <div class="accel-comps">
+      <span class="c-x">Forward <b id="acc-x">–</b></span>
+      <span class="c-y">Left <b id="acc-y">–</b></span>
+      <span class="c-z">Up <b id="acc-z">–</b></span>
+      <span class="c-felt">sensor total <b id="acc-felt">–</b> g</span>
+    </div>
+  </div>
+
   <nav class="toolbar">
     <button data-cmd="f" title="Then push the board forward once"><kbd>F</kbd>Set forward</button>
     <button data-cmd="z" title="Put the board back at the start and clear the drawn moves"><kbd>Z</kbd>Reset position</button>
@@ -102,6 +125,7 @@
     <button id="btn-top" title="Look straight down"><kbd>T</kbd>Top</button>
     <button id="btn-3d" title="Back to the 3D angle"><kbd>3</kbd>3D</button>
     <button id="btn-axes" class="toggle on" title="Show or hide the X, Y and Z axes"><kbd>X</kbd>Axes</button>
+    <button id="btn-accel" class="toggle on" title="Show or hide the acceleration readout"><kbd>G</kbd>Accel</button>
   </nav>
 
   <div class="help">Each big square = 1 m, lines every 10 cm up close · drag to orbit · right-drag to pan · scroll to zoom</div>

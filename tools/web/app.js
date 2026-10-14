@@ -485,6 +485,41 @@ function setSteps(count, averageCm, totalCm) {
     : 'No steps yet';
 }
 
+// The acceleration the board is experiencing, as the firmware works it out
+// (gravity removed, so about 0 at rest). The bar is logarithmic so a gentle
+// push and a hard knock both show, up to the sensor's 24 g limit.
+const ACC_LIMIT_G = 24;
+
+// The Accel button: show or hide the whole readout. Remembered between visits.
+let accelShown = true;
+try {
+  accelShown = localStorage.getItem('imu.accel') !== 'off';
+} catch (e) { /* storage blocked; the default is on */ }
+
+function setAccelShown(on) {
+  accelShown = on;
+  document.getElementById('accel').style.display = on ? '' : 'none';
+  document.getElementById('btn-accel').classList.toggle('on', on);
+  try {
+    localStorage.setItem('imu.accel', on ? 'on' : 'off');
+  } catch (e) { /* not remembered, still works */ }
+}
+const accFraction = (g) => Math.min(1, Math.log2(1 + Math.max(0, g)) / Math.log2(1 + ACC_LIMIT_G));
+const signed2 = (v) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(2)}`;
+
+function setAccel([forward, left, up, linear, felt, hold]) {
+  $('acc-lin').textContent = linear.toFixed(2);
+  $('acc-hold').textContent = hold.toFixed(1);
+  $('acc-x').textContent = signed2(forward);
+  $('acc-y').textContent = signed2(left);
+  $('acc-z').textContent = signed2(up);
+  $('acc-felt').textContent = felt.toFixed(2);
+  const fill = $('acc-fill');
+  fill.style.width = `${(accFraction(linear) * 100).toFixed(1)}%`;
+  // green while gentle, amber for a hard push, red as it nears the sensor's limit
+  fill.style.background = linear < 1 ? '#34d399' : linear < 8 ? '#fbbf24' : '#f87171';
+}
+
 // Which edge of the board counts as its front: "<axis index>:<sign>", e.g. "2:-1"
 // is -z. The default, +x, is the firmware's own heading. On a foot the board's x
 // axis can point almost straight down, where yaw means nothing, so this can be
@@ -592,7 +627,7 @@ function updateMoveList() {
   list.replaceChildren();
   const recent = moves.slice(-LIST_MOVES).reverse();
   recent.forEach((m, age) => {
-    const parsed = /:\s*([\d.]+) cm (.+?), in ([\d.]+) s/.exec(m.text);
+    const parsed = /:\s*([\d.]+) cm (.+?), in ([\d.]+) s(?:, peak ([\d.]+) g)?/.exec(m.text);
     const li = document.createElement('li');
     if (age === 0) li.className = 'latest';
     li.style.opacity = String(Math.max(0.3, 1 - age * 0.09));
@@ -600,10 +635,17 @@ function updateMoveList() {
     li.innerHTML = `
       <div class="move-icon"><span style="transform: rotate(${icon.angle.toFixed(0)}deg)">${icon.glyph}</span></div>
       <div><div class="move-dir"></div><div class="move-sub"></div></div>
-      <div class="move-dist"></div>`;
+      <div class="move-right"><div class="move-dist"></div><div class="move-acc"></div></div>`;
     li.querySelector('.move-dir').textContent = parsed ? parsed[2] : m.text;
     li.querySelector('.move-sub').textContent = parsed ? `Step ${m.step} · ${parsed[3]} s` : `Step ${m.step}`;
     li.querySelector('.move-dist').textContent = parsed ? `${parsed[1]} cm` : '';
+    // The hardest push during the step, coloured like the acceleration bar.
+    const acc = li.querySelector('.move-acc');
+    if (parsed && parsed[4] !== undefined) {
+      const g = Number(parsed[4]);
+      acc.textContent = `peak ${g.toFixed(1)} g`;
+      acc.classList.add(g < 1 ? 'low' : g < 8 ? 'mid' : 'high');
+    }
     list.appendChild(li);
   });
   $('move-empty').hidden = moves.length > 0;
@@ -671,6 +713,8 @@ function handle(line) {
     const v = numbers.trim().split(/\s+/).map(Number);
     clearTrail();
     addMove(v[0], v.slice(1, 4), v.slice(4, 7), text);
+  } else if (kind === 'ACC') {
+    setAccel(rest.trim().split(/\s+/).map(Number));
   } else if (kind === 'STEPS') {
     const [count, averageCm, totalCm] = rest.trim().split(/\s+/).map(Number);
     setSteps(count, averageCm, totalCm);
@@ -747,6 +791,8 @@ $('btn-fit').addEventListener('click', fitAll);
 $('btn-top').addEventListener('click', topView);
 $('btn-3d').addEventListener('click', view3d);
 $('btn-axes').addEventListener('click', () => setAxes(!axesOn));
+$('btn-accel').addEventListener('click', () => setAccelShown(!accelShown));
+setAccelShown(accelShown); // apply the remembered choice
 setAxes(axesOn); // apply the remembered choice
 const frontSelect = $('front-axis');
 frontSelect.value = frontAxisChoice;
@@ -768,6 +814,7 @@ addEventListener('keydown', (e) => {
   else if (key === 't') topView();
   else if (key === '3') view3d();
   else if (key === 'x') setAxes(!axesOn);
+  else if (key === 'g') setAccelShown(!accelShown);
 });
 
 addEventListener('resize', () => {

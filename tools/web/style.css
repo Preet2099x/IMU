@@ -287,6 +287,17 @@ li.latest .move-icon { background: linear-gradient(135deg, var(--accent), var(--
 .move-dir { font-weight: 500; font-size: 13px; }
 .move-sub { color: var(--faint); font-size: 11.5px; }
 
+.move-right { text-align: right; }
+
+.move-acc {
+  min-height: 14px;
+  font: 600 11px var(--mono);
+  color: var(--faint);
+}
+.move-acc.low { color: #34d399; }
+.move-acc.mid { color: #fbbf24; }
+.move-acc.high { color: #f87171; }
+
 .move-dist {
   font-family: var(--mono);
   font-weight: 600;
@@ -315,6 +326,14 @@ li.latest .move-icon { background: linear-gradient(135deg, var(--accent), var(--
   gap: 6px;
   padding: 6px;
   border-radius: 16px;
+}
+
+/* Nine buttons are wide; on a narrow window let the bar wrap to two rows. */
+.toolbar {
+  width: max-content; /* its natural width, not the half a window left of its 50% offset */
+  max-width: calc(100vw - 24px);
+  flex-wrap: wrap;
+  justify-content: center;
 }
 
 .toolbar button {
@@ -470,4 +489,110 @@ kbd {
 
 @media (max-width: 900px) {
   .moves, .minimap { display: none; }
+}
+
+/* ---- live acceleration ---------------------------------------------------- */
+
+.accel {
+  top: 62px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(430px, calc(100vw - 620px));
+  min-width: 300px;
+  padding: 10px 14px 9px;
+}
+
+.accel-top { display: flex; align-items: baseline; gap: 12px; }
+
+.accel-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.accel-value .num {
+  font-family: var(--mono);
+  font-size: 24px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.accel-value .unit { color: var(--muted); font-size: 13px; margin-left: 4px; }
+.accel-peak { margin-left: auto; color: var(--muted); font-size: 12px; }
+.accel-peak b { font-family: var(--mono); color: var(--text); font-weight: 600; }
+
+.accel-bar {
+  position: relative;
+  height: 8px;
+  margin: 9px 0 17px;
+  border-radius: 99px;
+  background: rgba(148, 163, 184, 0.14);
+}
+
+.accel-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: 99px;
+  background: var(--ok);
+  transition: width 0.08s linear;
+}
+
+.accel-mark {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  left: 12.6%; /* 0.5 g on the squeezed scale: a move starts counting above this */
+  width: 2px;
+  border-radius: 2px;
+  background: #fff;
+  opacity: 0.85;
+}
+
+.accel-bar .tick.mark-label { color: var(--text); opacity: 0.8; }
+
+.accel-bar .tick {
+  position: absolute;
+  top: 12px;
+  transform: translateX(-50%);
+  font: 600 9.5px var(--mono);
+  color: var(--faint);
+}
+
+.accel-bar .tick.end { left: 100%; transform: translateX(-100%); }
+
+.accel-comps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.accel-comps b {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.accel-comps .c-x::before,
+.accel-comps .c-y::before,
+.accel-comps .c-z::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+}
+.accel-comps .c-x::before { background: #f87171; }
+.accel-comps .c-y::before { background: #4ade80; }
+.accel-comps .c-z::before { background: #60a5fa; }
+.accel-comps .c-felt { margin-left: auto; }
+
+@media (max-width: 1000px) {
+  .accel-comps .c-felt { display: none; }
 }

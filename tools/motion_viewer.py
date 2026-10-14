@@ -48,6 +48,7 @@ class Hub:
         self.state = None
         self.steps = None
         self.live = None
+        self.acc = None
         self.history = []  # @PATH, @MOVE and @INFO since the last @RESET
 
     def publish(self, line):
@@ -56,6 +57,8 @@ class Hub:
                 self.link = line
             elif line.startswith("@LIVE"):
                 self.live = line
+            elif line.startswith("@ACC"):
+                self.acc = line  # 25 a second: only the latest matters
             elif line.startswith("@STATE"):
                 self.state = line
             elif line.startswith("@STEPS"):
@@ -75,7 +78,7 @@ class Hub:
             # "#hello" tells the page to start from scratch; "#caught-up" ends the
             # catch-up, so the page doesn't pop up old notices as new.
             catch_up = ["#hello", self.link, "@RESET", *self.history, self.state, self.steps, self.live,
-                        "#caught-up"]
+                        self.acc, "#caught-up"]
             for line in catch_up:
                 if line:
                     q.put(line)
@@ -104,7 +107,14 @@ class Link:
     def __init__(self, port, hub, log_path, skip_mag):
         self.port, self.hub, self.log_path, self.skip_mag = port, hub, log_path, skip_mag
         self.ser = None
-        threading.Thread(target=self._run, daemon=True).start()
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        """Stop reading and let the serial port go cleanly, so the board is free to flash."""
+        self.stop.set()
+        self.thread.join(2.0)
 
     def send(self, data):
         ser = self.ser
@@ -116,7 +126,7 @@ class Link:
 
     def _run(self):
         with open(self.log_path, "a", encoding="utf-8") as log:
-            while True:
+            while not self.stop.is_set():
                 port = self.port or find_teensy()
                 if not port:
                     self.hub.publish("#link Teensy not found - is it plugged in?")
@@ -127,15 +137,15 @@ class Link:
                         self.ser = ser
                         self.hub.publish(f"#link connected on {port}")
                         buf = b""
-                        while True:
+                        while not self.stop.is_set():
                             buf += ser.read(4096)
                             while b"\n" in buf:
                                 raw, buf = buf.split(b"\n", 1)
                                 line = raw.decode(errors="replace").rstrip()
                                 log.write(line + "\n")
-                                # @LIVE is 25 a second and the raw R samples 400, too many to
-                                # read; the log keeps them all.
-                                if not line.startswith(("@LIVE", "R ", "RX ")):
+                                # @LIVE and @ACC are 25 a second and the raw R samples 400, too
+                                # many to read; the log keeps them all.
+                                if not line.startswith(("@LIVE", "@ACC", "R ", "RX ")):
                                     print(line, flush=True)
                                 if self.skip_mag and "SKIP mag calibration" in line:
                                     ser.write(b"s")
@@ -202,6 +212,16 @@ class Handler(BaseHTTPRequestHandler):
             hub.unsubscribe(q)
 
     def do_POST(self):
+        if self.path == "/quit":
+            # Close the board's port properly first; killing the process instead
+            # can leave Windows holding the port until the cable is replugged.
+            link = self.server.link
+            if link:
+                link.close()
+            self.send_response(204)
+            self.end_headers()
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
         if self.path != "/cmd":
             self.send_error(404)
             return

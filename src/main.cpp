@@ -643,6 +643,12 @@ void quaternionToEuler(float &rollDeg, float &pitchDeg, float &yawDeg) {
 //   @LIVE <x y z> <board x axis> <board y axis> <board z axis>
 //                                            25 times a second: where the board is now (cm)
 //                                            and which way its axes point, earth frame
+//   @ACC <fwd left up> <linear> <felt> <hold>
+//                                            25 times a second, in g: the acceleration with
+//                                            gravity removed (forward, left, up in the earth
+//                                            frame, then its size), the sensor's total
+//                                            including gravity, and the hardest linear
+//                                            acceleration seen in the last 3 s
 // Sending 'z' zeroes the position, 'r' resets the step count, and 'f' makes the
 // next push define forward.
 //
@@ -749,6 +755,13 @@ float linNowG = 0.0f; // linear accel right now, g
 int restCount = 0;    // consecutive samples below MOTION_ACCEL_G
 float peakLinG = 0.0f; // highest linear accel since the last status print, for tuning
 
+// The acceleration the board is experiencing now, for the live readout.
+float accLinG[3] = {0.0f, 0.0f, 0.0f}; // gravity removed, earth frame (forward, left, up), g
+float accFeltG = 1.0f;                 // what the sensor reads in total, gravity included, g
+float accHoldG = 0.0f;                 // hardest linear acceleration in the last few seconds, g
+uint32_t accHoldAtMs = 0;
+constexpr uint32_t ACC_HOLD_MS = 3000;
+
 float norm3(const float v[3]) {
   return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
 }
@@ -832,6 +845,11 @@ void reportLive() {
                 1.0f - 2.0f * (y * y + z * z), 2.0f * (x * y + w * z), 2.0f * (x * z - w * y),
                 2.0f * (x * y - w * z), 1.0f - 2.0f * (x * x + z * z), 2.0f * (y * z + w * x),
                 2.0f * (x * z + w * y), 2.0f * (y * z - w * x), 1.0f - 2.0f * (x * x + y * y));
+}
+
+void reportAccel() {
+  Serial.printf("@ACC %.3f %.3f %.3f  %.3f  %.3f  %.3f\n", accLinG[0], accLinG[1], accLinG[2],
+                norm3(accLinG), accFeltG, accHoldG);
 }
 
 void reportSteps() {
@@ -1093,6 +1111,10 @@ void finishMove(float dt) {
   }
   float activeS = lastMoving >= firstMoving ? (lastMoving - firstMoving + 1) * dt : 0.0f;
 
+  // The hardest push during the step (gravity removed), for the step list.
+  float peakG = 0.0f;
+  for (int i = 0; i < moveLen; i++) peakG = fmaxf(peakG, moveBuf[i].lin);
+
   if (alignPending) {
     float horiz = sqrtf(d[0] * d[0] + d[1] * d[1]);
     if (horiz < ALIGN_MIN_M) {
@@ -1138,10 +1160,10 @@ void finishMove(float dt) {
                     (start[1] + pathBuf[j][1]) * 100.0f, (start[2] + pathBuf[j][2]) * 100.0f);
     }
     Serial.println();
-    Serial.printf("@MOVE %d %.2f %.2f %.2f %.2f %.2f %.2f | Step %d: %.1f cm %s, in %.2f s\n",
+    Serial.printf("@MOVE %d %.2f %.2f %.2f %.2f %.2f %.2f | Step %d: %.1f cm %s, in %.2f s, peak %.1f g\n",
                   moveCount, start[0] * 100.0f, start[1] * 100.0f, start[2] * 100.0f,
                   position[0] * 100.0f, position[1] * 100.0f, position[2] * 100.0f,
-                  stepCount, distM * 100.0f, dir, activeS);
+                  stepCount, distM * 100.0f, dir, activeS, peakG);
     Serial.printf("  steps: %d, average %.1f cm, distance travelled %.1f cm\n", stepCount,
                   stepSumM / stepCount * 100.0f, stepSumM * 100.0f);
     reportSteps();
@@ -1182,6 +1204,16 @@ void deadReckonStep(const float gDps[3], const float aG[3], float dt) {
     aBodyFast[k] += kFast * (aG[k] - aBodyFast[k]);
     gBodyFast[k] += kFast * (gDps[k] - gBodyFast[k]);
   }
+  // Live readout: smoothed linear acceleration by components, the total the
+  // sensor feels, and a short peak hold so a brief jolt stays readable.
+  for (int k = 0; k < 3; k++) accLinG[k] = (eFast[k] - gravity[k]) / GRAVITY_MS2;
+  accFeltG = norm3(aG);
+  uint32_t nowMs = millis();
+  if (s.lin >= accHoldG || nowMs - accHoldAtMs > ACC_HOLD_MS) {
+    accHoldG = s.lin;
+    accHoldAtMs = nowMs;
+  }
+
   bool bodyStill = fabsf(norm3(aBodyFast) - gravityG) < BODY_STILL_ACCEL_G &&
                    norm3(gBodyFast) < BODY_STILL_GYRO_DPS;
   bodyStillCount = bodyStill ? bodyStillCount + 1 : 0;
@@ -1440,6 +1472,7 @@ void loop() {
   if (millis() - lastLiveMs >= LIVE_INTERVAL_MS) {
     lastLiveMs = millis();
     reportLive();
+    reportAccel();
   }
 
   if (millis() - lastPrintMs >= PRINT_INTERVAL_MS) {
