@@ -49,6 +49,36 @@
       <div class="readout small"><span class="axis">Steps</span><span id="dist-steps" class="num">0</span><span class="unit"></span></div>
       <div class="readout small"><span class="axis">Average step</span><span id="dist-avg" class="num">0.0</span><span class="unit">cm</span></div>
     </aside>
+
+    <aside class="card heading" title="Which way the board points, measured from the forward direction you set with F. It runs 0 to 360, anticlockwise: 90 is left, 180 behind, 270 right. There is no compass in use, so it can slowly drift.">
+      <div class="card-title">Heading</div>
+      <div class="heading-row">
+        <svg class="dial" viewBox="-30 -30 60 60" aria-hidden="true">
+          <circle class="dial-ring" r="27"></circle>
+          <line class="dial-tick" x1="0" y1="-27" x2="0" y2="-22"></line>
+          <line class="dial-tick" x1="27" y1="0" x2="22" y2="0"></line>
+          <line class="dial-tick" x1="0" y1="27" x2="0" y2="22"></line>
+          <line class="dial-tick" x1="-27" y1="0" x2="-22" y2="0"></line>
+          <text class="dial-f" x="0" y="-12">F</text>
+          <g id="dial-arrow"><path class="dial-arrow" d="M0,-19 L7,6 L0,1 L-7,6 Z"></path></g>
+        </svg>
+        <div>
+          <div class="yaw"><span class="yaw-name">Yaw</span><span id="yaw" class="num">0.0</span><span class="unit">°</span></div>
+          <div id="yaw-note" class="formula">facing forward</div>
+        </div>
+      </div>
+      <div class="divider"></div>
+      <div class="readout small"><span class="axis">Tilt</span><span id="tilt" class="num">+0.0</span><span class="unit">°</span></div>
+      <div class="readout small" title="Which edge of the board is its front. Pick the one that points along your toes; the dial arrow should then point the way your foot points.">
+        <label class="axis" for="front-axis">Front edge</label>
+        <select id="front-axis">
+          <option value="0:1">+x</option><option value="0:-1">−x</option>
+          <option value="1:1">+y</option><option value="1:-1">−y</option>
+          <option value="2:1">+z</option><option value="2:-1">−z</option>
+        </select>
+        <span class="unit"></span>
+      </div>
+    </aside>
   </div>
 
   <aside class="card moves">

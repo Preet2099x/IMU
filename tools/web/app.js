@@ -465,6 +465,7 @@ function onLive(v) {
   lastLive = v.slice(0, 3);
   ensureAxes(v[0], v[1], v[2]);
   setReadouts();
+  setHeading(v.slice(3, 6), v.slice(6, 9), v.slice(9, 12));
 }
 
 // ---------------------------------------------------------------------------
@@ -482,6 +483,43 @@ function setSteps(count, averageCm, totalCm) {
   $('dist-formula').textContent = count
     ? `${count} step${count === 1 ? '' : 's'} × ${averageCm.toFixed(1)} cm average`
     : 'No steps yet';
+}
+
+// Which edge of the board counts as its front: "<axis index>:<sign>", e.g. "2:-1"
+// is -z. The default, +x, is the firmware's own heading. On a foot the board's x
+// axis can point almost straight down, where yaw means nothing, so this can be
+// changed to the edge that points along the toes. It is remembered.
+let frontAxisChoice = '0:1';
+try {
+  frontAxisChoice = localStorage.getItem('imu.front') || '0:1';
+} catch (e) { /* storage blocked; the default is fine */ }
+
+// Yaw and tilt of that edge, from the board's axes in the earth frame (the
+// columns of the rotation matrix, as the firmware sends them). For +x the yaw
+// is exactly the heading the firmware prints. Yaw is measured from the forward
+// direction set with F, turning anticlockwise (to the left), and shown as a
+// full 0-360: 0 forward, 90 left, 180 behind, 270 right. Tilt is how far the
+// edge points above (+) or below (-) the horizontal.
+let lastAxes = null; // the latest board axes, so a changed front edge shows at once
+function setHeading(xAxis, yAxis, zAxis) {
+  lastAxes = [xAxis, yAxis, zAxis];
+  const deg = 180 / Math.PI;
+  const [index, sign] = frontAxisChoice.split(':').map(Number);
+  const edge = [xAxis, yAxis, zAxis][index].map((c) => c * sign);
+  const yaw = Math.atan2(edge[1], edge[0]) * deg;
+  const tilt = Math.asin(Math.max(-1, Math.min(1, edge[2]))) * deg;
+  const steep = Math.abs(tilt) > 75; // nearly straight up or down: yaw is meaningless
+  // 0-360 on the card; the note keeps the plain "turned 30 left / 30 right".
+  const yawFull = (((Math.round(yaw * 10) / 10) % 360) + 360) % 360;
+  $('yaw').textContent = yawFull.toFixed(1);
+  $('tilt').textContent = signed(tilt);
+  $('yaw-note').textContent = steep ? 'edge is vertical: pick another front edge'
+    : Math.abs(yaw) < 1 ? 'facing forward'
+    : `turned ${Math.abs(yaw).toFixed(0)}° ${yaw > 0 ? 'left' : 'right'}`;
+  const arrow = document.getElementById('dial-arrow');
+  // On the dial, forward is up and left is anticlockwise, like the top view.
+  arrow.setAttribute('transform', `rotate(${-yaw.toFixed(1)})`);
+  arrow.style.opacity = steep ? '0.25' : '1';
 }
 
 function setReadouts() {
@@ -710,6 +748,17 @@ $('btn-top').addEventListener('click', topView);
 $('btn-3d').addEventListener('click', view3d);
 $('btn-axes').addEventListener('click', () => setAxes(!axesOn));
 setAxes(axesOn); // apply the remembered choice
+const frontSelect = $('front-axis');
+frontSelect.value = frontAxisChoice;
+frontSelect.addEventListener('change', () => {
+  frontAxisChoice = frontSelect.value;
+  try {
+    localStorage.setItem('imu.front', frontAxisChoice);
+  } catch (e) { /* not remembered, still works */ }
+  if (lastAxes) setHeading(...lastAxes);
+});
+// Typing in the selector must not trigger the single-key shortcuts below.
+frontSelect.addEventListener('keydown', (e) => e.stopPropagation());
 addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const key = e.key.toLowerCase();
